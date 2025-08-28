@@ -851,10 +851,10 @@ esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seco
             
             // 这里可以添加退出条件，比如检查按键或其他信号
             // 为了演示，我们执行3个录音-播放循环后自动退出
-            if (cycle_count >= 3) {
-                ESP_LOGI(TAG, "Auto-stop after %d record-playback cycles for demonstration", cycle_count);
-                break;
-            }
+            // if (cycle_count >= 3) {
+            //     ESP_LOGI(TAG, "Auto-stop after %d record-playback cycles for demonstration", cycle_count);
+            //     break;
+            // }
         }
         
         ESP_LOGI(TAG, "Record-playback loop completed (%d cycles)", cycle_count);
