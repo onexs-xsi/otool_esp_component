@@ -351,9 +351,10 @@ public:
      * 
      * 使用简洁的实现方式，仿照示例代码结构
      * @param record_duration_seconds 录音时长（秒）
+     * @param loop_playback 是否循环播放录音内容，默认为false
      * @return esp_err_t 返回操作结果
      */
-    esp_err_t record_and_playback_test(uint32_t record_duration_seconds = 5);
+    esp_err_t record_and_playback_test(uint32_t record_duration_seconds = 5, bool loop_playback = false);
 
     /**
      * @brief 播放指定类型的音频文件

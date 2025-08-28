@@ -741,7 +741,7 @@ esp_err_t audio_es_tools::record_test(uint32_t record_duration_ms)
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seconds)
+esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seconds, bool loop_playback)
 {
     if (!es7210_initialized || !es8311_initialized) {
         ESP_LOGE(TAG, "Audio devices not initialized");
@@ -753,76 +753,8 @@ esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seco
         return ESP_ERR_INVALID_STATE;
     }
 
-    // 当 record_duration_seconds 为 0 时，进行持续录音和播放
-    if (record_duration_seconds == 0) {
-        ESP_LOGI(TAG, "=== Continuous record and playback test (press any key to stop) ===");
-        
-        const size_t BLOCK_SIZE = 512;
-        uint8_t *data = (uint8_t *)malloc(BLOCK_SIZE);
-        if (data == NULL) {
-            ESP_LOGE(TAG, "Failed to allocate memory for continuous recording buffer");
-            return ESP_ERR_NO_MEM;
-        }
-        
-        ESP_LOGI(TAG, "Starting continuous record and playback... (block size: %zu bytes)", BLOCK_SIZE);
-        
-        size_t total_processed = 0;
-        esp_err_t ret = ESP_OK;
-        
-        // 持续录音和播放循环
-        while (true) {
-            // 录音一个块
-            ret = esp_codec_dev_read(record_dev, data, BLOCK_SIZE);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Continuous recording failed: %s", esp_err_to_name(ret));
-                break;
-            }
-            
-            // 立即播放录音内容
-            ret = esp_codec_dev_write(play_dev, data, BLOCK_SIZE);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Continuous playback failed: %s", esp_err_to_name(ret));
-                break;
-            }
-            
-            // 简单的音频数据验证 - 检查是否有有效的音频信号
-            int16_t *samples = (int16_t *)data;
-            size_t sample_count = BLOCK_SIZE / sizeof(int16_t);
-            int16_t max_sample = INT16_MIN;
-            int16_t min_sample = INT16_MAX;
-            
-            for (size_t i = 0; i < sample_count; i++) {
-                if (samples[i] > max_sample) max_sample = samples[i];
-                if (samples[i] < min_sample) min_sample = samples[i];
-            }
-            
-            // 验证录音数据不是常数（有变化）
-            if (max_sample > min_sample) {
-                // 有效的音频信号
-            }
-            
-            total_processed += BLOCK_SIZE;
-            
-            // 每处理 1MB 数据打印一次状态
-            if ((total_processed % (1024 * 1024)) == 0) {
-                ESP_LOGI(TAG, "Continuous mode: processed %zu MB, signal range: [%d, %d]", 
-                         total_processed / (1024 * 1024), min_sample, max_sample);
-            }
-            
-            // 简单的退出检查 - 在实际应用中可以通过按键、GPIO或其他方式控制
-            // 这里使用任务延时避免占用太多CPU
-            vTaskDelay(pdMS_TO_TICKS(1));
-            
-            // 可以在这里添加退出条件，比如检查某个全局标志位
-            // if (should_stop_continuous_mode) break;
-        }
-        
-        free(data);
-        ESP_LOGI(TAG, "=== Continuous record and playback test completed, total processed: %zu bytes ===", total_processed);
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "=== Record and playback test (%lu seconds) ===", record_duration_seconds);
+    ESP_LOGI(TAG, "=== Record and playback test (%lu seconds, loop: %s) ===", 
+             record_duration_seconds, loop_playback ? "YES" : "NO");
     
     // 获取当前音频格式信息
     esp_codec_dev_sample_info_t fs = {};
@@ -879,17 +811,57 @@ esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seco
     }
     ESP_LOGI(TAG, "Recording completed, bytes read: %zu", bytes_read);
 
-    esp_err_t write_ret = esp_codec_dev_write(play_dev, data, buffer_size);
-    if (write_ret != ESP_OK) {
-        ESP_LOGE(TAG, "Playback failed: %s", esp_err_to_name(write_ret));
-    }
-    else{
-        ESP_LOGI(TAG, "Playback completed successfully -> bytes written: %d", buffer_size);
-    }
-    
-    esp_err_t clear_ret = clear_audio_pipeline(80);
-    if (clear_ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to clear audio pipeline in record_and_playback_test");
+    // 播放录音内容
+    if (loop_playback) {
+        ESP_LOGI(TAG, "Starting loop playback mode (press any key to stop)...");
+        
+        // 循环播放模式
+        int loop_count = 0;
+        while (true) {
+            loop_count++;
+            ESP_LOGI(TAG, "Playing loop #%d...", loop_count);
+            
+            esp_err_t write_ret = esp_codec_dev_write(play_dev, data, buffer_size);
+            if (write_ret != ESP_OK) {
+                ESP_LOGE(TAG, "Playback failed on loop #%d: %s", loop_count, esp_err_to_name(write_ret));
+                break;
+            }
+            
+            ESP_LOGI(TAG, "Loop #%d playback completed -> bytes written: %d", loop_count, buffer_size);
+            
+            // 清理音频管道，避免循环间的音频残留
+            esp_err_t clear_ret = clear_audio_pipeline(50);
+            if (clear_ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to clear audio pipeline in loop #%d", loop_count);
+            }
+            
+            // 循环间隔
+            vTaskDelay(pdMS_TO_TICKS(500));
+            
+            // 这里可以添加退出条件，比如检查按键或其他信号
+            // 为了演示，我们播放3次后自动退出
+            if (loop_count >= 3) {
+                ESP_LOGI(TAG, "Auto-stop after %d loops for demonstration", loop_count);
+                break;
+            }
+        }
+        
+        ESP_LOGI(TAG, "Loop playback completed (%d loops)", loop_count);
+    } else {
+        // 单次播放模式
+        ESP_LOGI(TAG, "Playing recorded audio once...");
+        
+        esp_err_t write_ret = esp_codec_dev_write(play_dev, data, buffer_size);
+        if (write_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Playback failed: %s", esp_err_to_name(write_ret));
+        } else {
+            ESP_LOGI(TAG, "Playback completed successfully -> bytes written: %d", buffer_size);
+        }
+        
+        esp_err_t clear_ret = clear_audio_pipeline(80);
+        if (clear_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to clear audio pipeline in record_and_playback_test");
+        }
     }
         
     // 释放内存
