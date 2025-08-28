@@ -778,77 +778,121 @@ esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seco
         return ESP_ERR_NO_MEM;
     }
     
-    memset(data, 0, record_bytes);
-        
     int buffer_size = (int)record_bytes;
-        
-    ESP_LOGI(TAG, "Start recording %lu seconds... (buffer: %d bytes)", record_duration_seconds, buffer_size);
-        
-    // 录音阶段 - 使用固定块大小循环读取
-    TickType_t start_time = xTaskGetTickCount();
-    size_t bytes_read = 0;
     const size_t BLOCK_SIZE = 512; // 使用固定块大小
     const TickType_t timeout_ticks = pdMS_TO_TICKS(record_duration_seconds * 1000 + 300);
-    
-    while (bytes_read < record_bytes) {
-        // 计算本次读取的块大小
-        size_t read_size = (record_bytes - bytes_read > BLOCK_SIZE) ? BLOCK_SIZE : (record_bytes - bytes_read);
-        
-        esp_err_t ret = esp_codec_dev_read(record_dev, data + bytes_read, (int)read_size);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Recording failed: %s", esp_err_to_name(ret));
-            free(data);
-            return ESP_FAIL;
-        }
-        
-        bytes_read += read_size;
-        
-        // 检查是否超时
-        if ((xTaskGetTickCount() - start_time) > timeout_ticks) {
-            ESP_LOGW(TAG, "Record timeout reached, stopping early");
-            break;
-        }
-    }
-    ESP_LOGI(TAG, "Recording completed, bytes read: %zu", bytes_read);
 
-    // 播放录音内容
     if (loop_playback) {
-        ESP_LOGI(TAG, "Starting loop playback mode (press any key to stop)...");
+        ESP_LOGI(TAG, "Starting record-playback loop mode (each cycle: record %lu sec -> play %lu sec)...", 
+                 record_duration_seconds, record_duration_seconds);
         
-        // 循环播放模式
-        int loop_count = 0;
+        // 录音-播放循环模式
+        int cycle_count = 0;
         while (true) {
-            loop_count++;
-            ESP_LOGI(TAG, "Playing loop #%d...", loop_count);
+            cycle_count++;
+            ESP_LOGI(TAG, "=== Cycle #%d START ===", cycle_count);
+            
+            // 清零缓冲区
+            memset(data, 0, record_bytes);
+            
+            // 录音阶段
+            ESP_LOGI(TAG, "Cycle #%d: Recording %lu seconds... (buffer: %d bytes)", 
+                     cycle_count, record_duration_seconds, buffer_size);
+            
+            TickType_t start_time = xTaskGetTickCount();
+            size_t bytes_read = 0;
+            
+            while (bytes_read < record_bytes) {
+                // 计算本次读取的块大小
+                size_t read_size = (record_bytes - bytes_read > BLOCK_SIZE) ? BLOCK_SIZE : (record_bytes - bytes_read);
+                
+                esp_err_t ret = esp_codec_dev_read(record_dev, data + bytes_read, (int)read_size);
+                if (ret != ESP_OK) {
+                    ESP_LOGE(TAG, "Cycle #%d recording failed: %s", cycle_count, esp_err_to_name(ret));
+                    free(data);
+                    return ESP_FAIL;
+                }
+                
+                bytes_read += read_size;
+                
+                // 检查是否超时
+                if ((xTaskGetTickCount() - start_time) > timeout_ticks) {
+                    ESP_LOGW(TAG, "Cycle #%d record timeout reached, stopping early", cycle_count);
+                    break;
+                }
+            }
+            
+            ESP_LOGI(TAG, "Cycle #%d: Recording completed, bytes read: %zu", cycle_count, bytes_read);
+            
+            // 录音和播放之间的短暂间隔
+            vTaskDelay(pdMS_TO_TICKS(200));
+            
+            // 播放阶段
+            ESP_LOGI(TAG, "Cycle #%d: Playing recorded audio...", cycle_count);
             
             esp_err_t write_ret = esp_codec_dev_write(play_dev, data, buffer_size);
             if (write_ret != ESP_OK) {
-                ESP_LOGE(TAG, "Playback failed on loop #%d: %s", loop_count, esp_err_to_name(write_ret));
-                break;
+                ESP_LOGE(TAG, "Cycle #%d playback failed: %s", cycle_count, esp_err_to_name(write_ret));
+                // 播放失败不退出循环，继续下一轮录音
+            } else {
+                ESP_LOGI(TAG, "Cycle #%d: Playback completed -> bytes written: %d", cycle_count, buffer_size);
             }
-            
-            ESP_LOGI(TAG, "Loop #%d playback completed -> bytes written: %d", loop_count, buffer_size);
             
             // 清理音频管道，避免循环间的音频残留
             esp_err_t clear_ret = clear_audio_pipeline(50);
             if (clear_ret != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to clear audio pipeline in loop #%d", loop_count);
+                ESP_LOGW(TAG, "Failed to clear audio pipeline in cycle #%d", cycle_count);
             }
+            
+            ESP_LOGI(TAG, "=== Cycle #%d COMPLETED ===", cycle_count);
             
             // 循环间隔
             vTaskDelay(pdMS_TO_TICKS(500));
             
             // 这里可以添加退出条件，比如检查按键或其他信号
-            // 为了演示，我们播放3次后自动退出
-            if (loop_count >= 3) {
-                ESP_LOGI(TAG, "Auto-stop after %d loops for demonstration", loop_count);
+            // 为了演示，我们执行3个录音-播放循环后自动退出
+            if (cycle_count >= 3) {
+                ESP_LOGI(TAG, "Auto-stop after %d record-playback cycles for demonstration", cycle_count);
                 break;
             }
         }
         
-        ESP_LOGI(TAG, "Loop playback completed (%d loops)", loop_count);
+        ESP_LOGI(TAG, "Record-playback loop completed (%d cycles)", cycle_count);
     } else {
-        // 单次播放模式
+        // 单次录音播放模式
+        ESP_LOGI(TAG, "Single record-playback mode");
+        
+        // 清零缓冲区
+        memset(data, 0, record_bytes);
+        
+        ESP_LOGI(TAG, "Start recording %lu seconds... (buffer: %d bytes)", record_duration_seconds, buffer_size);
+            
+        // 录音阶段 - 使用固定块大小循环读取
+        TickType_t start_time = xTaskGetTickCount();
+        size_t bytes_read = 0;
+        
+        while (bytes_read < record_bytes) {
+            // 计算本次读取的块大小
+            size_t read_size = (record_bytes - bytes_read > BLOCK_SIZE) ? BLOCK_SIZE : (record_bytes - bytes_read);
+            
+            esp_err_t ret = esp_codec_dev_read(record_dev, data + bytes_read, (int)read_size);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Recording failed: %s", esp_err_to_name(ret));
+                free(data);
+                return ESP_FAIL;
+            }
+            
+            bytes_read += read_size;
+            
+            // 检查是否超时
+            if ((xTaskGetTickCount() - start_time) > timeout_ticks) {
+                ESP_LOGW(TAG, "Record timeout reached, stopping early");
+                break;
+            }
+        }
+        ESP_LOGI(TAG, "Recording completed, bytes read: %zu", bytes_read);
+
+        // 播放录音内容
         ESP_LOGI(TAG, "Playing recorded audio once...");
         
         esp_err_t write_ret = esp_codec_dev_write(play_dev, data, buffer_size);
