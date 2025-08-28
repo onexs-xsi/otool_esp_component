@@ -12,6 +12,7 @@
 #include "i2c_bus_tools.h"
 #include "audio_es_tools.h"
 #include "ir_nec_tools.h"
+#include "esp_sd_tool.h"
 
 /**
  * @brief otool_toolbox 工具箱基类
@@ -25,6 +26,7 @@ public:
     i2c_bus_tools i2c_tools;  ///< I2C总线工具对象
     audio_es_tools audio_tools; ///< 音频处理工具对象
     ir_nec_tools ir_nec; ///< IR NEC 红外工具对象
+    sd_tools sd_card; ///< SD卡工具对象
 
     /**
      * @brief 构造函数

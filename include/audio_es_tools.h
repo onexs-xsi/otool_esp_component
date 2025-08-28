@@ -92,9 +92,46 @@ typedef enum {
 } audio_bits_per_sample_t;
 
 /**
+ * @brief ES7210麦克风通道选择枚举
+ * 
+ * 定义ES7210 ADC的麦克风输入通道配置
+ * 可以组合使用多个通道（使用位或操作）
+ */
+typedef enum {
+    AUDIO_MIC_NONE = 0x00,                    ///< 不选择任何麦克风
+    AUDIO_MIC_CHANNEL_1 = 0x01,               ///< 麦克风通道1 (MIC1)
+    AUDIO_MIC_CHANNEL_2 = 0x02,               ///< 麦克风通道2 (MIC2) 
+    AUDIO_MIC_CHANNEL_3 = 0x04,               ///< 麦克风通道3 (MIC3)
+    AUDIO_MIC_CHANNEL_4 = 0x08,               ///< 麦克风通道4 (MIC4)
+    AUDIO_MIC_CHANNEL_12 = 0x03,              ///< 麦克风通道1+2
+    AUDIO_MIC_CHANNEL_13 = 0x05,              ///< 麦克风通道1+3
+    AUDIO_MIC_CHANNEL_14 = 0x09,              ///< 麦克风通道1+4
+    AUDIO_MIC_CHANNEL_23 = 0x06,              ///< 麦克风通道2+3
+    AUDIO_MIC_CHANNEL_24 = 0x0A,              ///< 麦克风通道2+4
+    AUDIO_MIC_CHANNEL_34 = 0x0C,              ///< 麦克风通道3+4
+    AUDIO_MIC_CHANNEL_123 = 0x07,             ///< 麦克风通道1+2+3
+    AUDIO_MIC_CHANNEL_124 = 0x0B,             ///< 麦克风通道1+2+4
+    AUDIO_MIC_CHANNEL_134 = 0x0D,             ///< 麦克风通道1+3+4
+    AUDIO_MIC_CHANNEL_234 = 0x0E,             ///< 麦克风通道2+3+4
+    AUDIO_MIC_CHANNEL_ALL = 0x0F              ///< 所有麦克风通道1+2+3+4
+} audio_mic_channel_t;
+
+/**
  * @brief audio_es_tools 类
  * 
  * 提供ES8311和ES7210音频芯片的操作功能，包括初始化、播放、录音和睡眠管理
+ * 
+ * 架构设计：
+ * - 主类负责系统级管理和I2S通道控制
+ * - ES8311功能实现在 audio_es_es8311.cpp 中
+ * - ES7210功能实现在 audio_es_es7210.cpp 中 
+ * - 为未来扩展新音频设备提供统一框架
+ * 
+ * 扩展新设备方法：
+ * 1. 创建对应的 audio_es_xxx.cpp 文件
+ * 2. 在此类中添加相应的成员变量和初始化函数
+ * 3. 确保遵循现有的I2S用户计数管理机制
+ * 4. 在audio_system_sleep()中添加对应的睡眠调用
  */
 class audio_es_tools {
 private:
@@ -128,10 +165,17 @@ private:
     bool suppress_release = false;          ///< 在系统整体去初始化期间暂缓 I2S 释放
     
     // I2S 通道配置参数
-    i2s_port_t i2s_port_num = I2S_NUM_0;              ///< I2S通道编号
-    audio_channels_t audio_channels = AUDIO_CHANNELS_STEREO;    ///< 音频声道数量
+    i2s_port_t i2s_port_num = I2S_NUM_0;                        ///< I2S通道编号
+    audio_channels_t audio_channels = AUDIO_CHANNELS_MONO;      ///< 音频声道数量
     audio_sample_rate_t sample_rate = AUDIO_SAMPLE_RATE_44K1;   ///< 采样率
     audio_bits_per_sample_t bits_per_sample = AUDIO_BITS_16;    ///< 位深度
+    
+    // 音频响度配置
+    float volume = 80.0;                    ///< 播放音量 (0.0 - 100.0)
+    float record_gain = 30.0;               ///< 录音增益 (0.0 - 66.0 dB)
+    
+    // ES7210 麦克风通道配置
+    audio_mic_channel_t mic_channels = AUDIO_MIC_CHANNEL_1;   ///< 默认使用麦克风通道1
 
     // 内部辅助函数
     esp_err_t ensure_i2s_channel();         ///< 确保已创建 I2S 通道
@@ -170,6 +214,7 @@ public:
     /**
      * @brief 初始化ES8311音频芯片（DAC播放）
      * 
+     * 使用audio_system_init中配置的声道数量
      * @return esp_err_t 返回操作结果
      */
     esp_err_t es8311_init();
@@ -226,9 +271,11 @@ public:
     /**
      * @brief 初始化ES7210音频芯片（ADC录音）
      * 
+     * 使用audio_system_init中配置的声道数量
+     * @param mic_channels 麦克风通道选择
      * @return esp_err_t 返回操作结果
      */
-    esp_err_t es7210_init();
+    esp_err_t es7210_init(audio_mic_channel_t mic_channels);
 
     /**
      * @brief 去初始化ES7210音频芯片
@@ -315,6 +362,14 @@ public:
      * @return esp_err_t 返回操作结果
      */
     esp_err_t play_audio_file(audio_file_type_t audio_type);
+
+    /**
+     * @brief 清理音频播放管道，发送静音数据清除残留音频
+     * 
+     * @param silence_duration_ms 静音持续时间（毫秒），默认100ms
+     * @return esp_err_t 返回操作结果
+     */
+    esp_err_t clear_audio_pipeline(uint32_t silence_duration_ms = 100);
 
     /**
      * @brief 获取播放设备句柄
@@ -508,6 +563,106 @@ public:
      * @return audio_bits_per_sample_t 当前位深度
      */
     audio_bits_per_sample_t get_bits_per_sample() const { return bits_per_sample; }
+
+    /**
+     * @brief 设置播放音量
+     * 
+     * @param volume 播放音量 (0.0 - 100.0)
+     * @return esp_err_t 返回操作结果
+     */
+    esp_err_t set_volume(float volume);
+
+    /**
+     * @brief 获取当前播放音量
+     * 
+     * @return float 当前播放音量 (0.0 - 100.0)
+     */
+    float get_volume() const { return volume; }
+
+    /**
+     * @brief 设置录音增益
+     * 
+     * @param gain 录音增益 (0.0 - 66.0 dB)
+     * @return esp_err_t 返回操作结果
+     */
+    esp_err_t set_record_gain(float gain);
+
+    /**
+     * @brief 获取当前录音增益
+     * 
+     * @return float 当前录音增益 (0.0 - 66.0 dB)
+     */
+    float get_record_gain() const { return record_gain; }
+
+    /**
+     * @brief 设置音量和录音增益
+     * 
+     * @param volume 播放音量 (0.0 - 100.0)
+     * @param gain 录音增益 (0.0 - 66.0 dB)
+     * @return esp_err_t 返回操作结果
+     */
+    esp_err_t set_audio_levels(float volume, float gain);
+
+    /**
+     * @brief 设置ES7210麦克风通道
+     * 
+     * @param channels 麦克风通道选择，可以组合使用多个通道
+     * @return esp_err_t 返回操作结果
+     */
+    // esp_err_t set_mic_channels(audio_mic_channel_t channels); // 已删除，请直接在es7210_init中传入参数
+
+    /**
+     * @brief 获取当前麦克风通道配置
+     * 
+     * @return audio_mic_channel_t 当前麦克风通道配置
+     */
+    audio_mic_channel_t get_mic_channels() const { return mic_channels; }
+
+    /**
+     * @brief 获取麦克风通道的描述字符串
+     * 
+     * @param channels 麦克风通道配置
+     * @return const char* 麦克风通道描述字符串
+     */
+    const char* get_mic_channels_description(audio_mic_channel_t channels) const;
+
+    /**
+     * @brief 检查指定的麦克风通道配置是否有效
+     * 
+     * @param channels 要检查的麦克风通道配置
+     * @return bool 返回通道配置的有效性
+     */
+    bool is_mic_channels_valid(audio_mic_channel_t channels) const;
+
+    /**
+     * @brief 计算当前选择的麦克风数量(按位计数)
+     * @return int 麦克风通道个数(0~4)
+     */
+    int count_selected_mics() const;
+
+    // ========== 未来扩展接口示例 ==========
+    // 为接入新的音频设备预留的接口框架
+    
+    /**
+     * @brief 通用音频设备初始化接口（预留）
+     * 
+     * 当需要支持新的音频设备时，可以实现此接口
+     * @param device_type 设备类型标识
+     * @param config 设备配置参数
+     * @return esp_err_t 返回操作结果
+     * 
+     * 使用示例：
+     * // 未来支持ES9038等新设备时
+     * // audio_device_init("ES9038", &es9038_config);
+     */
+    // esp_err_t audio_device_init(const char* device_type, void* config);
+    
+    /**
+     * @brief 获取支持的音频设备列表（预留）
+     * 
+     * @return const char** 返回支持的设备类型数组
+     */
+    // const char** get_supported_devices() const;
 };
 
 #endif // __AUDIO_ES_TOOLS_H__

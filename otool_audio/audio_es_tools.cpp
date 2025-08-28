@@ -9,8 +9,6 @@
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
 #include "esp_codec_dev_defaults.h"
-#include "es8311_codec.h"
-#include "es7210_adc.h"
 
 #ifdef USE_PCM_TEST_A
 // test_a.pcm 可用时的处理逻辑
@@ -31,6 +29,36 @@ extern const uint8_t _binary_sine_440Hz_30s_44100Hz_16bit_1ch_pcm_end[];
 #endif
 
 static const char *TAG = "audio_es_tools";
+
+/**
+ * 音频系统架构说明：
+ * 
+ * 本音频工具类采用模块化设计，将功能拆分为以下几个部分：
+ * 
+ * 1. audio_es_tools.cpp (主文件)
+ *    - 系统级初始化和配置管理
+ *    - I2S通道创建和管理  
+ *    - 通用音频播放和测试功能
+ *    - 配置参数的getter/setter
+ *    - 为未来接入更多设备提供统一接口
+ * 
+ * 2. audio_es_es8311.cpp 
+ *    - ES8311 DAC专用初始化和去初始化
+ *    - ES8311睡眠管理
+ *    - ES8311特定的配置和控制
+ * 
+ * 3. audio_es_es7210.cpp
+ *    - ES7210 ADC专用初始化和去初始化  
+ *    - ES7210睡眠管理
+ *    - ES7210特定的配置和控制
+ * 
+ * 未来扩展新音频设备时，只需：
+ * 1. 创建对应的 audio_es_xxx.cpp 文件
+ * 2. 在主类中添加相应的初始化接口
+ * 3. 确保与现有I2S管理系统兼容
+ * 
+ * 这种设计提供了良好的模块隔离和扩展性。
+ */
 
 // 将指定 GPIO 配置为高阻态（输入，去掉上下拉）
 static inline void _gpio_set_high_z(gpio_num_t pin)
@@ -74,6 +102,13 @@ audio_es_tools::audio_es_tools()
     i2s_data_out_pin = I2S_DATA_OUT_PIN;
     i2s_ws_pin = I2S_DATA_WS_PIN;
     pa_pin = PA_PIN;
+    
+    // 初始化默认音频响度配置
+    volume = 80.0;
+    record_gain = 30.0;
+    
+    // 初始化默认麦克风通道配置
+    mic_channels = AUDIO_MIC_CHANNEL_12;
 }
 
 // 构造函数（带参数）
@@ -106,6 +141,13 @@ audio_es_tools::audio_es_tools(gpio_num_t bck_pin, gpio_num_t mck_pin, gpio_num_
     i2s_data_out_pin = data_out_pin;
     i2s_ws_pin = ws_pin;
     this->pa_pin = pa_pin;
+    
+    // 初始化默认音频响度配置
+    volume = 80.0;
+    record_gain = 30.0;
+    
+    // 初始化默认麦克风通道配置
+    mic_channels = AUDIO_MIC_CHANNEL_123;
 }
 
 // 析构函数
@@ -169,6 +211,7 @@ esp_err_t audio_es_tools::i2s_channel_init()
     
     // 1. 创建 I2S 通道（同时创建TX和RX）
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(i2s_port_num, I2S_ROLE_MASTER);
+    chan_cfg.dma_frame_num = 256;
     ret = i2s_new_channel(&chan_cfg, &tx_handle, &rx_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create I2S channels: %s", esp_err_to_name(ret));
@@ -429,322 +472,9 @@ esp_err_t audio_es_tools::i2s_rx_deinit()
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::es8311_init()
-{
-    if (es8311_initialized) {
-        ESP_LOGW(TAG, "ES8311 already initialized");
-        return ESP_OK;
-    }
-
-    ESP_LOGI(TAG, "Initializing ES8311 (DAC/Playback)...");
-    
-    esp_err_t ret = ESP_OK;
-    
-    // 确保 I2S 通道存在
-    ret = ensure_i2s_channel();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to ensure I2S channel: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    
-    if (play_dev) {
-        ESP_LOGW(TAG, "ES8311 codec device already created");
-        return ESP_OK;
-    }
-
-    // 仅播放其实只需要 TX，但底层数据接口可能允许同时给 RX，保持灵活
-    if (!tx_configured) {
-        ret = i2s_tx_init();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to configure I2S TX: %s", esp_err_to_name(ret));
-            return ret;
-        }
-    }
-
-    if (!i2c_bus_handle) {
-        ESP_LOGE(TAG, "I2C bus handle not set, cannot create codec device");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    ESP_LOGI(TAG, "Creating ES8311 codec device...");
-
-    
-    // 1. 创建 I2S 数据接口
-    audio_codec_i2s_cfg_t i2s_cfg = {};
-    i2s_cfg.tx_handle = tx_handle;
-    i2s_cfg.rx_handle = rx_handle;
-    
-    const audio_codec_data_if_t *data_if = audio_codec_new_i2s_data(&i2s_cfg);
-    if (!data_if) {
-        ESP_LOGE(TAG, "Failed to create I2S data interface");
-        return ESP_FAIL;
-    }
-
-    // 2. 创建 I2C 控制接口
-    audio_codec_i2c_cfg_t i2c_cfg = {};
-    i2c_cfg.addr = ES8311_CODEC_DEFAULT_ADDR;
-    i2c_cfg.bus_handle = i2c_bus_handle; 
-    
-    const audio_codec_ctrl_if_t *ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
-    if (!ctrl_if) {
-        ESP_LOGE(TAG, "Failed to create I2C control interface");
-        audio_codec_delete_data_if(data_if);
-        return ESP_FAIL;
-    }
-    
-    
-    // 3. 创建 GPIO 接口
-    const audio_codec_gpio_if_t *gpio_if = audio_codec_new_gpio();
-    if (!gpio_if) {
-        ESP_LOGE(TAG, "Failed to create GPIO interface");
-        audio_codec_delete_ctrl_if(ctrl_if);
-        audio_codec_delete_data_if(data_if);
-        return ESP_FAIL;
-    }
-    
-    // 4. 创建 ES8311 编解码器接口
-    es8311_codec_cfg_t es8311_cfg = {};
-    es8311_cfg.codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC;
-    es8311_cfg.ctrl_if = ctrl_if;
-    es8311_cfg.gpio_if = gpio_if;
-    es8311_cfg.pa_pin = pa_pin;
-    es8311_cfg.use_mclk = true;
-    es8311_cfg.pa_reverted = false;
-    
-    const audio_codec_if_t *codec_if = es8311_codec_new(&es8311_cfg);
-    if (!codec_if) {
-        ESP_LOGE(TAG, "Failed to create ES8311 codec interface");
-        audio_codec_delete_gpio_if(gpio_if);
-        audio_codec_delete_ctrl_if(ctrl_if);
-        audio_codec_delete_data_if(data_if);
-        return ESP_FAIL;
-    }
-    
-    // 5. 创建并配置播放设备
-    esp_codec_dev_cfg_t codec_dev_cfg = {};
-    codec_dev_cfg.codec_if = codec_if;
-    codec_dev_cfg.data_if = data_if;
-    codec_dev_cfg.dev_type = ESP_CODEC_DEV_TYPE_OUT;
-    
-    play_dev = esp_codec_dev_new(&codec_dev_cfg);
-    if (!play_dev) {
-        ESP_LOGE(TAG, "Failed to create codec device");
-        audio_codec_delete_codec_if(codec_if);
-        audio_codec_delete_gpio_if(gpio_if);
-        audio_codec_delete_ctrl_if(ctrl_if);
-        audio_codec_delete_data_if(data_if);
-        return ESP_FAIL;
-    }
-
-    // 6. 设置声音大小为80%
-    ret = esp_codec_dev_set_out_vol(play_dev, 80);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set output volume: %s", esp_err_to_name(ret));
-        esp_codec_dev_delete(play_dev);
-        play_dev = NULL;
-        audio_codec_delete_codec_if(codec_if);
-        audio_codec_delete_gpio_if(gpio_if);
-        audio_codec_delete_ctrl_if(ctrl_if);
-        audio_codec_delete_data_if(data_if);
-        return ret;
-    }
-    
-    // 7. 打开播放设备
-    esp_codec_dev_sample_info_t fs = {};
-    fs.sample_rate = (uint32_t)sample_rate;
-    fs.channel = (uint32_t)audio_channels;
-    fs.bits_per_sample = (uint32_t)bits_per_sample;
-    
-    ret = esp_codec_dev_open(play_dev, &fs);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open codec device: %s", esp_err_to_name(ret));
-        esp_codec_dev_delete(play_dev);
-        play_dev = NULL;
-        audio_codec_delete_codec_if(codec_if);
-        audio_codec_delete_gpio_if(gpio_if);
-        audio_codec_delete_ctrl_if(ctrl_if);
-        audio_codec_delete_data_if(data_if);
-        return ret;
-    }
-    
-    es8311_initialized = true;
-    incr_i2s_user();
-    es8311_sleeping = false;
-    
-    ESP_LOGI(TAG, "ES8311 initialized successfully");
-    return ESP_OK;
-}
-
-esp_err_t audio_es_tools::es8311_deinit()
-{
-    if (!es8311_initialized) {
-        ESP_LOGW(TAG, "ES8311 not initialized");
-        return ESP_OK;
-    }
-
-    ESP_LOGI(TAG, "Deinitializing ES8311...");
-    
-    // 关闭并删除播放设备
-    if (play_dev) {
-        esp_codec_dev_close(play_dev);
-        esp_codec_dev_delete(play_dev);
-        play_dev = NULL;
-    }
-    // 由 esp_codec_dev_close 完成禁用，同步标志
-    tx_configured = false;
-    
-    // 仅减少引用计数；真正释放由引用计数归零时处理
-    decr_i2s_user();
-    
-    es8311_initialized = false;
-    es8311_sleeping = false;
-    
-    ESP_LOGI(TAG, "ES8311 deinitialized successfully");
-    return ESP_OK;
-}
-
-esp_err_t audio_es_tools::es7210_init()
-{
-    if (es7210_initialized) {
-        ESP_LOGW(TAG, "ES7210 already initialized");
-        return ESP_OK;
-    }
-
-    ESP_LOGI(TAG, "Initializing ES7210 (ADC/Record)...");
-    
-    esp_err_t ret = ESP_OK;
-    
-    // 1. 检查前置条件
-    if (!i2c_bus_handle) {
-        ESP_LOGE(TAG, "I2C bus handle not set, cannot create ES7210 device");
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    // 确保 I2S 通道存在并配置 RX
-    ret = ensure_i2s_channel();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to ensure I2S channel: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    if (!rx_configured) {
-        ret = i2s_rx_init();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to configure I2S RX: %s", esp_err_to_name(ret));
-            return ret;
-        }
-    }
-    
-    // 2. 创建 I2S 数据接口（仅RX用于录音）
-    audio_codec_i2s_cfg_t i2s_cfg = {};
-    i2s_cfg.rx_handle = rx_handle;
-    i2s_cfg.tx_handle = NULL;  // ES7210只需要RX
-    
-    const audio_codec_data_if_t *data_if = audio_codec_new_i2s_data(&i2s_cfg);
-    if (!data_if) {
-        ESP_LOGE(TAG, "Failed to create I2S data interface for ES7210");
-        return ESP_FAIL;
-    }
-
-    // 3. 创建 I2C 控制接口
-    audio_codec_i2c_cfg_t i2c_cfg = {};
-    i2c_cfg.addr = ES7210_CODEC_DEFAULT_ADDR;
-    i2c_cfg.bus_handle = i2c_bus_handle;
-    
-    const audio_codec_ctrl_if_t *ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
-    if (!ctrl_if) {
-        ESP_LOGE(TAG, "Failed to create I2C control interface for ES7210");
-        audio_codec_delete_data_if(data_if);
-        return ESP_FAIL;
-    }
-    
-    // 4. 创建 ES7210 编解码器接口
-    es7210_codec_cfg_t es7210_cfg = {};
-    es7210_cfg.ctrl_if = ctrl_if;
-    es7210_cfg.master_mode = false;  // ES7210工作在从模式
-    es7210_cfg.mic_selected = ES7210_SEL_MIC1 | ES7210_SEL_MIC3;  // 选择麦克风1和3
-    es7210_cfg.mclk_src = ES7210_MCLK_FROM_PAD;
-    es7210_cfg.mclk_div = 256;  // MCLK/LRCK = 256 (44.1kHz)
-    
-    const audio_codec_if_t *codec_if = es7210_codec_new(&es7210_cfg);
-    if (!codec_if) {
-        ESP_LOGE(TAG, "Failed to create ES7210 codec interface");
-        audio_codec_delete_ctrl_if(ctrl_if);
-        audio_codec_delete_data_if(data_if);
-        return ESP_FAIL;
-    }
-    
-    // 5. 创建并配置录音设备
-    esp_codec_dev_cfg_t codec_dev_cfg = {};
-    codec_dev_cfg.codec_if = codec_if;
-    codec_dev_cfg.data_if = data_if;
-    codec_dev_cfg.dev_type = ESP_CODEC_DEV_TYPE_IN;  // 输入设备（录音）
-    
-    record_dev = esp_codec_dev_new(&codec_dev_cfg);
-    if (!record_dev) {
-        ESP_LOGE(TAG, "Failed to create ES7210 codec device");
-        audio_codec_delete_codec_if(codec_if);
-        audio_codec_delete_ctrl_if(ctrl_if);
-        audio_codec_delete_data_if(data_if);
-        return ESP_FAIL;
-    }
-
-    // 6. 设置输入增益（可选）
-    ret = esp_codec_dev_set_in_gain(record_dev, 30.0);  // 30dB增益
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to set input gain: %s", esp_err_to_name(ret));
-        // 继续执行，增益设置失败不是致命错误
-    }
-    
-    // 7. 打开录音设备
-    esp_codec_dev_sample_info_t fs = {};
-    fs.sample_rate = (uint32_t)sample_rate;
-    fs.channel = 1;  // 单通道录音
-    fs.bits_per_sample = (uint32_t)bits_per_sample;
-    
-    ret = esp_codec_dev_open(record_dev, &fs);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open ES7210 codec device: %s", esp_err_to_name(ret));
-        esp_codec_dev_delete(record_dev);
-        record_dev = NULL;
-        audio_codec_delete_codec_if(codec_if);
-        audio_codec_delete_ctrl_if(ctrl_if);
-        audio_codec_delete_data_if(data_if);
-        return ret;
-    }
-    
-    es7210_initialized = true;
-    incr_i2s_user();
-    es7210_sleeping = false;
-    
-    ESP_LOGI(TAG, "ES7210 initialized successfully");
-    return ESP_OK;
-}
-
-esp_err_t audio_es_tools::es7210_deinit()
-{
-    if (!es7210_initialized) {
-        ESP_LOGW(TAG, "ES7210 not initialized");
-        return ESP_OK;
-    }
-
-    ESP_LOGI(TAG, "Deinitializing ES7210...");
-    
-    // 关闭并删除录音设备
-    if (record_dev) {
-        esp_codec_dev_close(record_dev);
-        esp_codec_dev_delete(record_dev);
-        record_dev = NULL;
-    }
-    // 由 esp_codec_dev_close 完成禁用，同步标志
-    rx_configured = false;
-    
-    es7210_initialized = false;
-    decr_i2s_user();
-    es7210_sleeping = false;
-    
-    ESP_LOGI(TAG, "ES7210 deinitialized successfully");
-    return ESP_OK;
-}
+// ES8311和ES7210的具体实现已移至对应的独立源文件中
+// ES8311相关函数实现在 audio_es_es8311.cpp
+// ES7210相关函数实现在 audio_es_es7210.cpp
 
 esp_err_t audio_es_tools::audio_system_init(i2c_master_bus_handle_t i2c_bus_handle, i2s_port_t i2s_port_num, audio_channels_t channels, audio_sample_rate_t sample_rate, audio_bits_per_sample_t bits_per_sample)
 {
@@ -859,97 +589,7 @@ esp_err_t audio_es_tools::play_and_record_test()
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::es8311_sleep()
-{
-    if (!es8311_initialized) {
-        ESP_LOGE(TAG, "ES8311 not initialized");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    ESP_LOGI(TAG, "Putting ES8311 to sleep...");
-    
-    esp_err_t ret = ESP_OK;
-    
-    // 播放设备进入低功耗模式
-    if (play_dev) {
-        // 1. 设置输出音量为0（静音）
-        ret = esp_codec_dev_set_out_vol(play_dev, 0.0);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to mute ES8311: %s", esp_err_to_name(ret));
-        }
-        
-        // 2. 设置设备在关闭时禁用
-        ret = esp_codec_set_disable_when_closed(play_dev, true);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to set ES8311 disable when closed: %s", esp_err_to_name(ret));
-        }
-        
-        // 3. 关闭播放设备
-        ret = esp_codec_dev_close(play_dev);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to close ES8311: %s", esp_err_to_name(ret));
-        }
-        
-        ESP_LOGI(TAG, "ES8311 play device muted, disabled and closed");
-    }
-    
-    es8311_sleeping = true;
-    
-    ESP_LOGI(TAG, "ES8311 sleep mode enabled");
-    return ESP_OK;
-}
-
-esp_err_t audio_es_tools::es7210_sleep()
-{
-    if (!es7210_initialized) {
-        ESP_LOGE(TAG, "ES7210 not initialized");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    ESP_LOGI(TAG, "Putting ES7210 to sleep...");
-    
-    esp_err_t ret = ESP_OK;
-    
-    // 录音设备进入低功耗模式
-    if (record_dev) {
-        // 1. 设置输入增益为0（静音）
-        ret = esp_codec_dev_set_in_gain(record_dev, 0.0);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to mute ES7210: %s", esp_err_to_name(ret));
-        }
-        
-        // 2. 设置设备在关闭时禁用
-        ret = esp_codec_set_disable_when_closed(record_dev, true);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to set ES7210 disable when closed: %s", esp_err_to_name(ret));
-        }
-        
-        // 3. 关闭录音设备
-        ret = esp_codec_dev_close(record_dev);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to close ES7210: %s", esp_err_to_name(ret));
-        }
-        
-        ESP_LOGI(TAG, "ES7210 record device muted, disabled and closed");
-    }
-    
-    // 根据需要将 I2S 引脚置为高阻（睡眠优化），PA 由 ES8311 编解码器托管
-    if (pins_high_z_on_sleep) {
-        _gpio_set_high_z(i2s_mck_pin);
-        _gpio_set_high_z(i2s_bck_pin);
-        _gpio_set_high_z(i2s_ws_pin);
-        _gpio_set_high_z(i2s_data_out_pin);
-        _gpio_set_high_z(i2s_data_in_pin);
-        if (pa_pin != GPIO_NUM_NC) {
-            _gpio_set_high_z(pa_pin);
-        }
-        ESP_LOGI(TAG, "I2S + PA GPIOs set to High-Z for sleep");
-    }
-    es7210_sleeping = true;
-    
-    ESP_LOGI(TAG, "ES7210 sleep mode enabled");
-    return ESP_OK;
-}
+// ES8311和ES7210的睡眠功能实现已移至对应的独立源文件中
 
 esp_err_t audio_es_tools::audio_system_sleep()
 {
@@ -960,13 +600,13 @@ esp_err_t audio_es_tools::audio_system_sleep()
 
     ESP_LOGI(TAG, "Putting audio system to sleep...");
     
-    // 让所有已初始化的模块进入睡眠
+    // 调用各个模块的睡眠函数（实现在对应的专用文件中）
     if (es8311_initialized) {
-        es8311_sleep();
+        es8311_sleep();  // 实现在 audio_es_es8311.cpp
     }
     
     if (es7210_initialized) {
-        es7210_sleep();
+        es7210_sleep();  // 实现在 audio_es_es7210.cpp  
     }
     
     ESP_LOGI(TAG, "Audio system sleep mode enabled");
@@ -1013,12 +653,15 @@ esp_err_t audio_es_tools::record_test(uint32_t record_duration_ms)
 
     ESP_LOGI(TAG, "Starting %lu ms record test...", record_duration_ms);
 
-    // 分配录音缓冲区
-    const size_t sample_rate = 44100;
-    const size_t channels = 1;
-    const size_t bits_per_sample = 16;
-    const size_t bytes_per_sample = bits_per_sample / 8;
-    const size_t buffer_size = (sample_rate * channels * bytes_per_sample * record_duration_ms) / 1000;
+    // 分配录音缓冲区（动态参数）
+    const size_t sr = (size_t)sample_rate;
+    size_t channels = 0;
+    uint8_t mic_mask = static_cast<uint8_t>(mic_channels);
+    for (int i = 0; i < 4; ++i) if (mic_mask & (1 << i)) channels++;
+    if (channels == 0) channels = 1;
+    const size_t bps = (size_t)bits_per_sample;
+    const size_t bytes_per_sample = bps / 8;
+    const size_t buffer_size = (sr * channels * bytes_per_sample * record_duration_ms) / 1000;
     
     uint8_t *record_buffer = (uint8_t *)malloc(buffer_size);
     if (!record_buffer) {
@@ -1027,45 +670,61 @@ esp_err_t audio_es_tools::record_test(uint32_t record_duration_ms)
     }
 
     ESP_LOGI(TAG, "Record buffer allocated: %zu bytes", buffer_size);
-    ESP_LOGI(TAG, "Sample rate: %zu Hz, Channels: %zu, Bits: %zu", sample_rate, channels, bits_per_sample);
+    ESP_LOGI(TAG, "Sample rate: %zu Hz, Channels: %zu, Bits: %zu", sr, channels, bps);
 
-    // 开始录音
+    // 使用官方推荐的固定块大小读取方式
     TickType_t start_time = xTaskGetTickCount();
-    int bytes_read = esp_codec_dev_read(record_dev, record_buffer, buffer_size);
+    size_t bytes_read = 0;
+    const size_t BLOCK_SIZE = 512; // 使用固定块大小
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(record_duration_ms + 300); // 适度超时余量
+    
+    while (bytes_read < buffer_size) {
+        // 计算本次读取的块大小
+        size_t read_size = (buffer_size - bytes_read > BLOCK_SIZE) ? BLOCK_SIZE : (buffer_size - bytes_read);
+        
+        esp_err_t ret = esp_codec_dev_read(record_dev, record_buffer + bytes_read, (int)read_size);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Record read error: %s", esp_err_to_name(ret));
+            free(record_buffer);
+            return ESP_FAIL;
+        }
+        
+        bytes_read += read_size;
+        
+        // 检查是否超时
+        if ((xTaskGetTickCount() - start_time) > timeout_ticks) {
+            ESP_LOGW(TAG, "Record timeout reached (%lu ms), stop early", record_duration_ms);
+            break;
+        }
+    }
     TickType_t end_time = xTaskGetTickCount();
     
     uint32_t actual_duration = pdTICKS_TO_MS(end_time - start_time);
     
-    if (bytes_read < 0) {
-        ESP_LOGE(TAG, "Record failed with error code: %d", bytes_read);
-        free(record_buffer);
-        return ESP_FAIL;
-    }
-
     ESP_LOGI(TAG, "Record completed successfully");
     ESP_LOGI(TAG, "Requested duration: %lu ms, Actual duration: %lu ms", record_duration_ms, actual_duration);
-    ESP_LOGI(TAG, "Expected bytes: %zu, Actual bytes read: %d", buffer_size, bytes_read);
+    ESP_LOGI(TAG, "Expected bytes: %zu, Actual bytes read: %zu (%.1f%%)", buffer_size, bytes_read, (buffer_size? (bytes_read * 100.0 / buffer_size):0.0));
     
     // 简单的音频数据分析
     if (bytes_read > 0) {
-        int16_t *samples = (int16_t *)record_buffer;
-        size_t sample_count = bytes_read / sizeof(int16_t);
+    int16_t *samples = (int16_t *)record_buffer;
+    size_t total_samples = bytes_read / sizeof(int16_t); // 所有通道样本点
+    size_t frame_count = (channels > 0) ? total_samples / channels : total_samples;
         
         // 计算音频信号的基本统计信息
         int32_t sum = 0;
         int16_t min_val = INT16_MAX;
         int16_t max_val = INT16_MIN;
         
-        for (size_t i = 0; i < sample_count; i++) {
+        for (size_t i = 0; i < total_samples; i++) {
             int16_t sample = samples[i];
             sum += abs(sample);
             if (sample < min_val) min_val = sample;
             if (sample > max_val) max_val = sample;
         }
-        
-        int32_t avg_amplitude = sum / sample_count;
-        ESP_LOGI(TAG, "Audio analysis - Samples: %zu, Avg amplitude: %ld, Range: [%d, %d]", 
-                 sample_count, avg_amplitude, min_val, max_val);
+        int32_t avg_amplitude = (total_samples > 0) ? (sum / (int32_t)total_samples) : 0;
+        ESP_LOGI(TAG, "Audio analysis - Frames: %zu, Total samples: %zu, Avg amplitude: %ld, Range: [%d, %d]", 
+                 frame_count, total_samples, avg_amplitude, min_val, max_val);
         
         // 检查是否捕获到有效音频信号
         if (avg_amplitude > 100) {
@@ -1096,58 +755,76 @@ esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seco
 
     ESP_LOGI(TAG, "=== Record and playback test (%lu seconds) ===", record_duration_seconds);
     
-    // 仿照示例代码的while循环结构（实际只执行一次）
-    while (true)
-    {
-        // 获取当前音频格式信息
-        esp_codec_dev_sample_info_t fs = {};
-        fs.sample_rate = (uint32_t)this->sample_rate;
-        fs.channel = (uint32_t)this->audio_channels;
-        fs.bits_per_sample = (uint32_t)this->bits_per_sample;
+    // 获取当前音频格式信息
+    esp_codec_dev_sample_info_t fs = {};
+    fs.sample_rate = (uint32_t)this->sample_rate;
+    fs.channel = (this->audio_channels == AUDIO_CHANNELS_MONO) ? 1 : 2;
+    fs.bits_per_sample = (uint32_t)this->bits_per_sample;
         
-        // 计算缓冲区大小（仿照示例代码的计算方式）
-        uint8_t *data = (uint8_t *)malloc(fs.sample_rate * fs.channel * (fs.bits_per_sample >> 3) * record_duration_seconds);
-        if (data == NULL) {
-            {
-                size_t required = fs.sample_rate * fs.channel * (fs.bits_per_sample >> 3) * record_duration_seconds;
-                size_t free_heap = esp_get_free_heap_size();
-                size_t required_kb = (required + 1023) / 1024;
-                size_t free_kb = (free_heap + 1023) / 1024;
-                size_t missing_kb = (free_heap < required) ? ((required - free_heap + 1023) / 1024) : 0;
+    // 计算缓冲区大小
+    size_t bytes_per_sample = (fs.bits_per_sample >> 3);
+    size_t record_bytes = (size_t)fs.sample_rate * fs.channel * bytes_per_sample * record_duration_seconds;
+    uint8_t *data = (uint8_t *)malloc(record_bytes);
+    if (data == NULL) {
+        size_t free_heap = esp_get_free_heap_size();
+        size_t required_kb = (record_bytes + 1023) / 1024;
+        size_t free_kb = (free_heap + 1023) / 1024;
+        size_t missing_kb = (free_heap < record_bytes) ? (required_kb - free_kb) : 0;
 
-                ESP_LOGE(TAG, "Failed to allocate memory for recording");
-                ESP_LOGE(TAG, "Required: %zu bytes (%zu KB), Free: %zu bytes (%zu KB), Missing: %zu KB",
-                         required, required_kb, free_heap, free_kb, missing_kb);
-            }
-            break;
-        }
-        
-        int buffer_size = fs.sample_rate * fs.channel * (fs.bits_per_sample >> 3) * record_duration_seconds;
-        
-        ESP_LOGI(TAG, "Start recording %lu seconds... (buffer: %d bytes)", record_duration_seconds, buffer_size);
-        
-        // 录音阶段
-        esp_err_t ret = esp_codec_dev_read(record_dev, data, buffer_size);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Record failed: %s", esp_err_to_name(ret));
-            free(data);
-            break;
-        }
-        
-        ESP_LOGI(TAG, "Record completed, start playing...");
-        
-        // 播放阶段
-        ret = esp_codec_dev_write(play_dev, data, buffer_size);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Playback failed: %s", esp_err_to_name(ret));
-        } else {
-            ESP_LOGI(TAG, "Playback completed");
-        }
-        
-        // 释放内存
-        free(data);
-        break;  // 仿照示例代码，只执行一次
+        ESP_LOGE(TAG, "Failed to allocate memory for recording");
+        ESP_LOGE(TAG, "Required: %zu bytes (%zu KB), Free: %zu bytes (%zu KB), Missing: %zu KB",
+                record_bytes, required_kb, free_heap, free_kb, missing_kb);
+        return ESP_ERR_NO_MEM;
     }
+    
+    memset(data, 0, record_bytes);
+        
+    int buffer_size = (int)record_bytes;
+        
+    ESP_LOGI(TAG, "Start recording %lu seconds... (buffer: %d bytes)", record_duration_seconds, buffer_size);
+        
+    // 录音阶段 - 使用固定块大小循环读取
+    TickType_t start_time = xTaskGetTickCount();
+    size_t bytes_read = 0;
+    const size_t BLOCK_SIZE = 512; // 使用固定块大小
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(record_duration_seconds * 1000 + 300);
+    
+    while (bytes_read < record_bytes) {
+        // 计算本次读取的块大小
+        size_t read_size = (record_bytes - bytes_read > BLOCK_SIZE) ? BLOCK_SIZE : (record_bytes - bytes_read);
+        
+        esp_err_t ret = esp_codec_dev_read(record_dev, data + bytes_read, (int)read_size);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Recording failed: %s", esp_err_to_name(ret));
+            free(data);
+            return ESP_FAIL;
+        }
+        
+        bytes_read += read_size;
+        
+        // 检查是否超时
+        if ((xTaskGetTickCount() - start_time) > timeout_ticks) {
+            ESP_LOGW(TAG, "Record timeout reached, stopping early");
+            break;
+        }
+    }
+    ESP_LOGI(TAG, "Recording completed, bytes read: %zu", bytes_read);
+
+    esp_err_t write_ret = esp_codec_dev_write(play_dev, data, buffer_size);
+    if (write_ret != ESP_OK) {
+        ESP_LOGE(TAG, "Playback failed: %s", esp_err_to_name(write_ret));
+    }
+    else{
+        ESP_LOGI(TAG, "Playback completed successfully -> bytes written: %d", buffer_size);
+    }
+    
+    esp_err_t clear_ret = clear_audio_pipeline(80);
+    if (clear_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to clear audio pipeline in record_and_playback_test");
+    }
+        
+    // 释放内存
+    free(data);
     
     ESP_LOGI(TAG, "=== Record and playback test completed ===");
     return ESP_OK;
@@ -1378,7 +1055,52 @@ esp_err_t audio_es_tools::play_audio_file(audio_file_type_t audio_type)
         return ret;
     }
 
-    ESP_LOGI(TAG, "Audio playback completed successfully");
+    // 播放完成后，适度清理音频管道，避免残留声音
+    esp_err_t clear_ret = clear_audio_pipeline(80);
+    if (clear_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to clear audio pipeline: %s", esp_err_to_name(clear_ret));
+    }
+
+    ESP_LOGI(TAG, "Audio playbook completed successfully");
+    return ESP_OK;
+}
+
+esp_err_t audio_es_tools::clear_audio_pipeline(uint32_t silence_duration_ms)
+{
+    if (!play_dev || !es8311_initialized) {
+        ESP_LOGW(TAG, "Playback device not ready, skipping pipeline clear");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Clearing audio pipeline with %lu ms silence...", silence_duration_ms);
+
+    // 计算静音数据大小
+    uint32_t sample_rate_hz = (uint32_t)sample_rate;
+    uint32_t channels = (uint32_t)audio_channels;
+    uint32_t bits_per_sample_val = (uint32_t)bits_per_sample;
+    uint32_t bytes_per_sample = (bits_per_sample_val * channels) / 8;
+    size_t silence_size = (sample_rate_hz * bytes_per_sample * silence_duration_ms) / 1000;
+
+    // 分配并填充静音数据
+    uint8_t *silence_data = (uint8_t *)calloc(silence_size, 1); // calloc自动填充为0
+    if (!silence_data) {
+        ESP_LOGE(TAG, "Failed to allocate %zu bytes for silence buffer", silence_size);
+        return ESP_ERR_NO_MEM;
+    }
+
+    // 发送静音数据
+    esp_err_t ret = esp_codec_dev_write(play_dev, silence_data, silence_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write silence data: %s", esp_err_to_name(ret));
+        free(silence_data);
+        return ret;
+    }
+
+    // 等待静音播放完成
+    vTaskDelay(pdMS_TO_TICKS(silence_duration_ms + 50)); // 额外50ms确保完成
+
+    free(silence_data);
+    ESP_LOGI(TAG, "Audio pipeline cleared successfully");
     return ESP_OK;
 }
 
@@ -1414,8 +1136,15 @@ esp_err_t audio_es_tools::play_all_available_files() const
             
             if (ret == ESP_OK) {
                 played_count++;
-                // 播放间隔，避免音频重叠
-                vTaskDelay(pdMS_TO_TICKS(500));
+                
+                // 额外清理音频管道，确保没有残留声音
+                ret = const_cast<audio_es_tools*>(this)->clear_audio_pipeline(150);
+                if (ret != ESP_OK) {
+                    ESP_LOGW(TAG, "Failed to clear pipeline after %s", get_audio_file_name(audio_type));
+                }
+                
+                // 文件间播放间隔，避免音频重叠
+                vTaskDelay(pdMS_TO_TICKS(800));
             } else {
                 ESP_LOGW(TAG, "Failed to play %s: %s", 
                          get_audio_file_name(audio_type), esp_err_to_name(ret));
@@ -1433,4 +1162,136 @@ esp_err_t audio_es_tools::play_all_available_files() const
 
     ESP_LOGI(TAG, "Completed playing %d audio files", played_count);
     return last_error;
+}
+
+esp_err_t audio_es_tools::set_volume(float volume_value)
+{
+    // 检查音量范围
+    if (volume_value < 0.0 || volume_value > 100.0) {
+        ESP_LOGE(TAG, "Invalid volume %.1f, must be between 0.0 and 100.0", volume_value);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    volume = volume_value;
+    ESP_LOGI(TAG, "Volume set to %.1f", volume_value);
+    
+    // 如果播放设备已初始化，立即应用新的音量设置
+    if (play_dev && es8311_initialized) {
+        esp_err_t ret = esp_codec_dev_set_out_vol(play_dev, volume_value);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to apply volume %.1f: %s", volume_value, esp_err_to_name(ret));
+            return ret;
+        }
+        ESP_LOGI(TAG, "Applied volume %.1f to ES8311", volume_value);
+    }
+    
+    return ESP_OK;
+}
+
+esp_err_t audio_es_tools::set_record_gain(float gain)
+{
+    // 检查增益范围（ES7210支持0-66dB）
+    if (gain < 0.0 || gain > 66.0) {
+        ESP_LOGE(TAG, "Invalid record gain %.1f dB, must be between 0.0 and 66.0", gain);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    record_gain = gain;
+    ESP_LOGI(TAG, "Record gain set to %.1f dB", gain);
+    
+    // 如果录音设备已初始化，立即应用新的增益设置
+    if (record_dev && es7210_initialized) {
+        esp_err_t ret = esp_codec_dev_set_in_gain(record_dev, gain);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to apply record gain %.1f dB: %s", gain, esp_err_to_name(ret));
+            return ret;
+        }
+        ESP_LOGI(TAG, "Applied record gain %.1f dB to ES7210", gain);
+    }
+    
+    return ESP_OK;
+}
+
+esp_err_t audio_es_tools::set_audio_levels(float volume, float gain)
+{
+    esp_err_t ret_vol = set_volume(volume);
+    esp_err_t ret_gain = set_record_gain(gain);
+    
+    // 如果任一设置失败，返回失败
+    if (ret_vol != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set volume in audio levels configuration");
+        return ret_vol;
+    }
+    
+    if (ret_gain != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set record gain in audio levels configuration");
+        return ret_gain;
+    }
+    
+    ESP_LOGI(TAG, "Audio levels configured successfully - Volume: %.1f, Gain: %.1f dB", volume, gain);
+    return ESP_OK;
+}
+
+// set_mic_channels函数已删除，请直接在es7210_init中传入麦克风通道参数
+
+const char* audio_es_tools::get_mic_channels_description(audio_mic_channel_t channels) const
+{
+    switch (channels) {
+        case AUDIO_MIC_NONE:
+            return "None";
+        case AUDIO_MIC_CHANNEL_1:
+            return "MIC1";
+        case AUDIO_MIC_CHANNEL_2:
+            return "MIC2";
+        case AUDIO_MIC_CHANNEL_3:
+            return "MIC3";
+        case AUDIO_MIC_CHANNEL_4:
+            return "MIC4";
+        case AUDIO_MIC_CHANNEL_12:
+            return "MIC1+MIC2";
+        case AUDIO_MIC_CHANNEL_13:
+            return "MIC1+MIC3";
+        case AUDIO_MIC_CHANNEL_14:
+            return "MIC1+MIC4";
+        case AUDIO_MIC_CHANNEL_23:
+            return "MIC2+MIC3";
+        case AUDIO_MIC_CHANNEL_24:
+            return "MIC2+MIC4";
+        case AUDIO_MIC_CHANNEL_34:
+            return "MIC3+MIC4";
+        case AUDIO_MIC_CHANNEL_123:
+            return "MIC1+MIC2+MIC3";
+        case AUDIO_MIC_CHANNEL_124:
+            return "MIC1+MIC2+MIC4";
+        case AUDIO_MIC_CHANNEL_134:
+            return "MIC1+MIC3+MIC4";
+        case AUDIO_MIC_CHANNEL_234:
+            return "MIC2+MIC3+MIC4";
+        case AUDIO_MIC_CHANNEL_ALL:
+            return "MIC1+MIC2+MIC3+MIC4";
+        default:
+            return "Custom";
+    }
+}
+
+bool audio_es_tools::is_mic_channels_valid(audio_mic_channel_t channels) const
+{
+    // 检查通道值是否在有效范围内（0x00-0x0F）
+    if (channels > AUDIO_MIC_CHANNEL_ALL) {
+        return false;
+    }
+    
+    // AUDIO_MIC_NONE (0x00) 是有效的，表示不使用任何麦克风
+    return true;
+}
+
+int audio_es_tools::count_selected_mics() const
+{
+    uint8_t v = static_cast<uint8_t>(mic_channels);
+    int cnt = 0;
+    while (v) {
+        cnt += (v & 0x1);
+        v >>= 1;
+    }
+    return cnt;
 }

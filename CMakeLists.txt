@@ -11,39 +11,42 @@ set(EMBED_FILE_LIST "")
 set(COMPILE_DEFS "")
 
 if(ENABLE_PCM_TEST_A)
-    list(APPEND EMBED_FILE_LIST "otools_audio/test_a.pcm")
+    list(APPEND EMBED_FILE_LIST "otool_audio/test_a.pcm")
     list(APPEND COMPILE_DEFS "USE_PCM_TEST_A")
 endif()
 
 if(ENABLE_PCM_TEST_B)
-    list(APPEND EMBED_FILE_LIST "otools_audio/test_b.pcm")
+    list(APPEND EMBED_FILE_LIST "otool_audio/test_b.pcm")
     list(APPEND COMPILE_DEFS "USE_PCM_TEST_B")
 endif()
 
 if(ENABLE_PCM_SINE_440HZ)
-    list(APPEND EMBED_FILE_LIST "otools_audio/sine_440Hz_30s_44100Hz_16bit_1ch.pcm")
+    list(APPEND EMBED_FILE_LIST "otool_audio/sine_440Hz_30s_44100Hz_16bit_1ch.pcm")
     list(APPEND COMPILE_DEFS "USE_PCM_SINE_440HZ")
 endif()
 
 # 注册组件
 set(TOOLBOX_SRCS 
-    "otools_audio/audio_es_tools.cpp"
+    "otool_audio/audio_es_tools.cpp"
+    "otool_audio/audio_es_es8311.cpp"
+    "otool_audio/audio_es_es7210.cpp"
     "otool_i2c_bus/i2c_bus_tools.cpp"
-    "otools_ir_nec/ir_nec_encoder.c"
-    "otools_ir_nec/ir_nec_tools.cpp"
+    "otool_ir_nec/ir_nec_encoder.c"
+    "otool_ir_nec/ir_nec_tools.cpp"
     "otool_power_ic/power_ic_ip2315.cpp"
+    "otool_sd/esp_sd_tool.cpp"
     "otool_toolbox.cpp"
 )
 
 if(EMBED_FILE_LIST)
     idf_component_register(SRCS ${TOOLBOX_SRCS}
                         INCLUDE_DIRS "include"
-                        REQUIRES driver esp_driver_i2c i2c_bus esp_codec_dev
+                        REQUIRES driver esp_driver_i2c i2c_bus esp_codec_dev fatfs sdmmc  esp_timer
                         EMBED_FILES ${EMBED_FILE_LIST})
 else()
     idf_component_register(SRCS ${TOOLBOX_SRCS}
                         INCLUDE_DIRS "include"
-                        REQUIRES driver esp_driver_i2c i2c_bus esp_codec_dev)
+                        REQUIRES driver esp_driver_i2c i2c_bus esp_codec_dev fatfs sdmmc  esp_timer)
 endif()
 
 # 添加编译定义（在组件注册后）
