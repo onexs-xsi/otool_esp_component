@@ -2,6 +2,10 @@
 #include "esp_log.h"
 #include "ff.h"
 #include <string.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <vector>
 
 #ifdef __cplusplus
 #include <algorithm>
@@ -181,11 +185,14 @@ esp_err_t sd_tools::init()
 
     if (ret == ESP_OK) {
         initialized = true;
+        mounted = true;  // init_mmc_mode()和init_spi_mode()已经进行了挂载
         current_mode = mode;
-        ESP_LOGI(TAG, "SD card initialized successfully");
+        ESP_LOGI(TAG, "SD card initialized and mounted successfully");
         
-        // 自动挂载文件系统
-        ret = mount();
+        // 打印SD卡信息
+        if (card != nullptr) {
+            print_card_info();
+        }
     }
 
     return ret;
@@ -427,8 +434,13 @@ esp_err_t sd_tools::create_directory(const char* path)
         ESP_LOGI(TAG, "Directory created: %s", path);
         return ESP_OK;
     } else {
-        ESP_LOGE(TAG, "Failed to create directory: %s", path);
-        return ESP_FAIL;
+        if (errno == EEXIST) {
+            ESP_LOGI(TAG, "Directory already exists: %s", path);
+            return ESP_OK;  // 目录已存在不算错误
+        } else {
+            ESP_LOGE(TAG, "Failed to create directory: %s (errno: %d)", path, errno);
+            return ESP_FAIL;
+        }
     }
 }
 
@@ -458,7 +470,8 @@ esp_err_t sd_tools::write_file(const char* filepath, const void* data, size_t si
 
     FILE* file = fopen(filepath, "wb");
     if (file == NULL) {
-        ESP_LOGE(TAG, "Failed to open file for writing: %s", filepath);
+        ESP_LOGE(TAG, "Failed to open file for writing: %s (errno: %d, %s)", 
+                 filepath, errno, strerror(errno));
         return ESP_FAIL;
     }
 
@@ -507,8 +520,16 @@ esp_err_t sd_tools::performance_test(uint32_t test_size_mb, const char* test_fil
         return ESP_ERR_INVALID_STATE;
     }
 
-    std::string filepath = test_filepath ? test_filepath : 
-                          (mount_point + "/" + std::to_string(test_size_mb) + "MB_test.bin");
+    // 使用简单的文件名，避免特殊字符和长文件名问题
+    std::string filepath;
+    if (test_filepath) {
+        filepath = test_filepath;
+    } else {
+        // 使用简短的8.3格式文件名
+        char simple_name[32];
+        snprintf(simple_name, sizeof(simple_name), "/sdcard/test%d.bin", (int)test_size_mb);
+        filepath = simple_name;
+    }
 
     ESP_LOGI(TAG, "Starting %lu MB performance test", test_size_mb);
     
@@ -530,13 +551,30 @@ esp_err_t sd_tools::performance_test(uint32_t test_size_mb, const char* test_fil
 esp_err_t sd_tools::write_performance_test(uint32_t test_size_mb, const char* test_filepath, size_t chunk_size)
 {
     ESP_LOGI(TAG, "Starting %lu MB write performance test", test_size_mb);
+    ESP_LOGI(TAG, "Test file path: %s", test_filepath);
     
     // 删除可能存在的旧文件
     remove(test_filepath);
 
     int fd = open(test_filepath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0) {
-        ESP_LOGE(TAG, "Failed to open file for writing: %s", test_filepath);
+        ESP_LOGE(TAG, "Failed to open file for writing: %s (errno: %d)", test_filepath, errno);
+        
+        // 尝试检查目录是否存在
+        char* dir_path = strdup(test_filepath);
+        char* last_slash = strrchr(dir_path, '/');
+        if (last_slash) {
+            *last_slash = '\0';
+            DIR* dir = opendir(dir_path);
+            if (dir) {
+                ESP_LOGI(TAG, "Directory exists: %s", dir_path);
+                closedir(dir);
+            } else {
+                ESP_LOGE(TAG, "Directory does not exist: %s", dir_path);
+            }
+        }
+        free(dir_path);
+        
         return ESP_FAIL;
     }
     
@@ -643,46 +681,176 @@ esp_err_t sd_tools::read_performance_test(const char* test_filepath, size_t chun
     return result;
 }
 
-esp_err_t sd_tools::comprehensive_test(uint32_t test_size_mb)
+esp_err_t sd_tools::comprehensive_test(uint32_t test_count)
 {
     ESP_LOGI(TAG, "Starting comprehensive SD card test");
     
     // 初始化（如果还未初始化）
     esp_err_t ret = init();
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize SD card");
         return ret;
     }
     
-    // 列出文件
+    // 检查文件系统状态
+    ESP_LOGI(TAG, "Checking filesystem status...");
+    
+    // 列出挂载点内容
     list_files();
     
-    // 创建测试目录
-    std::string test_dir = mount_point + "/test";
-    create_directory(test_dir.c_str());
-    
-    // 性能测试
-    ret = performance_test(test_size_mb);
+    // 检查容量信息
+    uint64_t total_bytes, free_bytes;
+    ret = get_capacity_info(&total_bytes, &free_bytes);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Performance test failed, but continuing...");
+        ESP_LOGE(TAG, "Failed to get capacity info");
+        return ret;
     }
     
-    // 简单文件操作测试
-    std::string test_file = test_dir + "/hello.txt";
+    // 测试参数
+    if (test_count == 0) {
+        test_count = 128;  // 默认128次
+    }
+    const size_t chunk_size = 16384;  // 每次16384字节
+    
+    // 分配缓冲区
+    uint8_t* write_buffer = (uint8_t*)malloc(chunk_size);
+    uint8_t* read_buffer = (uint8_t*)malloc(chunk_size);
+    if (!write_buffer || !read_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate memory for test buffers");
+        free(write_buffer);
+        free(read_buffer);
+        return ESP_ERR_NO_MEM;
+    }
+    
+    // 初始化随机数种子
+    srand(esp_timer_get_time());
+    
+    // 测试统计
+    uint32_t success_count = 0;
+    uint32_t fail_count = 0;
+    uint64_t total_write_time = 0;
+    uint64_t total_read_time = 0;
+    
+    // 用于存储测试文件名的向量
+    std::vector<std::string> test_files;
+    
+    ESP_LOGI(TAG, "Starting %lu iterations of write/read/verify test (1024 bytes each)", test_count);
+    
+    // 首先进行简单的文件系统写入测试
+    ESP_LOGI(TAG, "Testing basic file write capability...");
+    std::string basic_test_file = mount_point + "/basic.txt";
     const char* test_data = "Hello, SD Card!";
-    ret = write_file(test_file.c_str(), test_data, strlen(test_data));
-    if (ret == ESP_OK) {
-        char read_buffer[64];
-        size_t bytes_read;
-        ret = read_file(test_file.c_str(), read_buffer, sizeof(read_buffer), &bytes_read);
-        if (ret == ESP_OK) {
-            read_buffer[bytes_read] = '\0';
-            ESP_LOGI(TAG, "File content: %s", read_buffer);
-        }
-        delete_file(test_file.c_str());
+    ret = write_file(basic_test_file.c_str(), test_data, strlen(test_data));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Basic file write test failed, aborting comprehensive test");
+        free(write_buffer);
+        free(read_buffer);
+        return ret;
     }
     
-    ESP_LOGI(TAG, "Comprehensive SD card test completed");
-    return ESP_OK;
+    // 删除基础测试文件
+    delete_file(basic_test_file.c_str());
+    ESP_LOGI(TAG, "Basic file write test passed, proceeding with comprehensive test");
+    
+    // 执行测试
+    for (uint32_t i = 0; i < test_count; i++) {
+        // 为每次迭代创建唯一的测试文件名 (使用8.3格式)
+        char filename[32];
+        snprintf(filename, sizeof(filename), "/test%03lu.bin", i + 1);
+        std::string test_file = mount_point + filename;
+        test_files.push_back(test_file);  // 记录文件名用于后续清理
+        
+        // 检查文件是否存在，如果存在则删除
+        FILE* check_file = fopen(test_file.c_str(), "r");
+        if (check_file != NULL) {
+            fclose(check_file);
+            ESP_LOGD(TAG, "File %s exists, deleting before test", test_file.c_str());
+            delete_file(test_file.c_str());
+        }
+        
+        // 生成随机数据
+        for (size_t j = 0; j < chunk_size; j++) {
+            write_buffer[j] = rand() & 0xFF;
+        }
+        
+        // 写入测试
+        uint64_t write_start = esp_timer_get_time();
+        ret = write_file(test_file.c_str(), write_buffer, chunk_size);
+        uint64_t write_end = esp_timer_get_time();
+        
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Write failed at iteration %lu", i + 1);
+            fail_count++;
+            continue;
+        }
+        total_write_time += (write_end - write_start);
+        
+        // 读取测试
+        size_t bytes_read = 0;
+        uint64_t read_start = esp_timer_get_time();
+        ret = read_file(test_file.c_str(), read_buffer, chunk_size, &bytes_read);
+        uint64_t read_end = esp_timer_get_time();
+        
+        if (ret != ESP_OK || bytes_read != chunk_size) {
+            ESP_LOGE(TAG, "Read failed at iteration %lu (read %zu bytes)", i + 1, bytes_read);
+            fail_count++;
+            continue;
+        }
+        total_read_time += (read_end - read_start);
+        
+        // 数据校验
+        bool verify_success = true;
+        for (size_t j = 0; j < chunk_size; j++) {
+            if (write_buffer[j] != read_buffer[j]) {
+                ESP_LOGE(TAG, "Data mismatch at iteration %lu, byte %zu: wrote 0x%02X, read 0x%02X", 
+                         i + 1, j, write_buffer[j], read_buffer[j]);
+                verify_success = false;
+                break;
+            }
+        }
+        
+        if (verify_success) {
+            success_count++;
+            if ((i + 1) % 10 == 0) {
+                ESP_LOGI(TAG, "Progress: %lu/%lu iterations completed", i + 1, test_count);
+            }
+        } else {
+            fail_count++;
+        }
+    }
+    
+    // 清理所有测试文件
+    ESP_LOGI(TAG, "Cleaning up test files...");
+    uint32_t deleted_count = 0;
+    for (const auto& file : test_files) {
+        if (delete_file(file.c_str()) == ESP_OK) {
+            deleted_count++;
+        }
+    }
+    ESP_LOGI(TAG, "Deleted %lu test files", deleted_count);
+    
+    // 计算统计数据
+    double avg_write_time_ms = (total_write_time / 1000.0) / test_count;
+    double avg_read_time_ms = (total_read_time / 1000.0) / test_count;
+    double write_speed_kb_s = (chunk_size / 1024.0) / (avg_write_time_ms / 1000.0);
+    double read_speed_kb_s = (chunk_size / 1024.0) / (avg_read_time_ms / 1000.0);
+    
+    // 打印测试总结
+    ESP_LOGI(TAG, "====== Comprehensive Test Summary ======");
+    ESP_LOGI(TAG, "Total iterations: %lu", test_count);
+    ESP_LOGI(TAG, "Successful: %lu (%.1f%%)", success_count, (success_count * 100.0) / test_count);
+    ESP_LOGI(TAG, "Failed: %lu (%.1f%%)", fail_count, (fail_count * 100.0) / test_count);
+    ESP_LOGI(TAG, "Average write time: %.2f ms (%.1f KB/s)", avg_write_time_ms, write_speed_kb_s);
+    ESP_LOGI(TAG, "Average read time: %.2f ms (%.1f KB/s)", avg_read_time_ms, read_speed_kb_s);
+    ESP_LOGI(TAG, "Total data processed: %lu KB", (test_count * chunk_size) / 1024);
+    ESP_LOGI(TAG, "Test result: %s", (fail_count == 0) ? "PASSED" : "FAILED");
+    ESP_LOGI(TAG, "========================================");
+    
+    // 释放内存
+    free(write_buffer);
+    free(read_buffer);
+    
+    return (fail_count == 0) ? ESP_OK : ESP_FAIL;
 }
 
 // === 状态查询方法 ===

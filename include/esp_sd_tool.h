@@ -318,10 +318,10 @@ public:
      * @brief 综合测试
      * 
      * 包含初始化、文件操作、性能测试的完整测试流程
-     * @param test_size_mb 性能测试大小(MB)
+     * @param test_count 测试文件数量 (默认128)
      * @return esp_err_t 测试结果
      */
-    esp_err_t comprehensive_test(uint32_t test_size_mb = 128);
+    esp_err_t comprehensive_test(uint32_t test_count = 128);
 
     // === 状态查询方法 ===
     
