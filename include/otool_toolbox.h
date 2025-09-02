@@ -13,6 +13,7 @@
 #include "audio_es_tools.h"
 #include "ir_nec_tools.h"
 #include "esp_sd_tool.h"
+#include "ic_rx8130.h"
 
 /**
  * @brief otool_toolbox 工具箱基类
@@ -27,6 +28,7 @@ public:
     audio_es_tools audio_tools; ///< 音频处理工具对象
     ir_nec_tools ir_nec; ///< IR NEC 红外工具对象
     sd_tools sd_card; ///< SD卡工具对象
+    ic_rx8130_tools rtc_rx8130; ///< RX8130 RTC工具对象
 
     /**
      * @brief 构造函数

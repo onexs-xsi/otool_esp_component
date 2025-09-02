@@ -25,6 +25,12 @@ if(ENABLE_PCM_SINE_440HZ)
     list(APPEND COMPILE_DEFS "USE_PCM_SINE_440HZ")
 endif()
 
+# 动态添加BMI270和BMM150传感器API源文件
+file(GLOB BMI270_API_SOURCES "otool_bmi270/BMI270_SensorAPI/*.c")
+file(GLOB BMM150_API_SOURCES "otool_bmi270/BMM150_SensorAPI/*.c")
+set(BMI_API_SOURCES ${BMI270_API_SOURCES} ${BMM150_API_SOURCES})
+set(BMI270_SRCS ${BMI_API_SOURCES} "otool_bmi270/bmi270_tools.cpp")
+
 # 注册组件
 set(TOOLBOX_SRCS 
     "otool_audio/audio_es_tools.cpp"
@@ -35,17 +41,19 @@ set(TOOLBOX_SRCS
     "otool_ir_nec/ir_nec_tools.cpp"
     "otool_power_ic/power_ic_ip2315.cpp"
     "otool_sd/esp_sd_tool.cpp"
+    "otool_ic_rx8130/ic_rx8130.cpp"
     "otool_toolbox.cpp"
+    ${BMI270_SRCS}
 )
 
 if(EMBED_FILE_LIST)
     idf_component_register(SRCS ${TOOLBOX_SRCS}
-                        INCLUDE_DIRS "include"
+                        INCLUDE_DIRS "include" "otool_bmi270/BMI270_SensorAPI" "otool_bmi270/BMM150_SensorAPI"
                         REQUIRES driver esp_driver_i2c i2c_bus esp_codec_dev fatfs sdmmc  esp_timer
                         EMBED_FILES ${EMBED_FILE_LIST})
 else()
     idf_component_register(SRCS ${TOOLBOX_SRCS}
-                        INCLUDE_DIRS "include"
+                        INCLUDE_DIRS "include" "otool_bmi270/BMI270_SensorAPI" "otool_bmi270/BMM150_SensorAPI"
                         REQUIRES driver esp_driver_i2c i2c_bus esp_codec_dev fatfs sdmmc  esp_timer)
 endif()
 
