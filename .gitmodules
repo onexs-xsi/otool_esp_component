@@ -1,0 +1,6 @@
+[submodule "otool_bmi270/BMI270_SensorAPI"]
+	path = otool_bmi270/BMI270_SensorAPI
+	url = https://github.com/boschsensortec/BMI270_SensorAPI.git
+[submodule "otool_bmi270/BMM150_SensorAPI"]
+	path = otool_bmi270/BMM150_SensorAPI
+	url = https://github.com/boschsensortec/BMM150_SensorAPI.git
