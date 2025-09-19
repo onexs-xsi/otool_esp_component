@@ -26,6 +26,9 @@ bmi270_tools::bmi270_tools(uint8_t addr, uint32_t bus_freq_hz)
     _current_config.acc_odr = ODR_200HZ;
     _current_config.gyr_odr = ODR_200HZ;
     
+    // 初始化默认模式
+    _current_mode = MODE_CONTEXT;
+    
     // 清零 BMI270 设备结构
     memset(&_bmi270_dev, 0, sizeof(_bmi270_dev));
 }
@@ -35,7 +38,7 @@ bmi270_tools::~bmi270_tools()
     deinit();
 }
 
-esp_err_t bmi270_tools::init(i2c_bus_handle_t bus, bool enable_magnetometer)
+esp_err_t bmi270_tools::init(i2c_bus_handle_t bus, i2c_bus_device_handle_t *i2c_device, bool enable_magnetometer, bmi270_mode_t mode)
 {
     if (_initialized) {
         ESP_LOGW(TAG, "BMI270 already initialized @0x%02X", _addr);
@@ -47,13 +50,24 @@ esp_err_t bmi270_tools::init(i2c_bus_handle_t bus, bool enable_magnetometer)
     }
 
     _bus = bus;
-    // 创建设备句柄
-    _dev = i2c_bus_device_create(_bus, _addr, _bus_freq);
-    if (_dev == nullptr) {
-        ESP_LOGE(TAG, "Failed to create I2C device for BMI270 @0x%02X", _addr);
-        return ESP_FAIL;
+    _current_mode = mode;  // 记录选择的模式
+    
+    // 判断是否需要自动创建设备句柄
+    if (i2c_device == nullptr || *i2c_device == nullptr) {
+        // 自动创建设备句柄
+        _dev = i2c_bus_device_create(_bus, _addr, _bus_freq);
+        if (_dev == nullptr) {
+            ESP_LOGE(TAG, "Failed to create I2C device for BMI270 @0x%02X", _addr);
+            return ESP_FAIL;
+        }
+        _owns_dev = true;
+        ESP_LOGD(TAG, "Auto-created I2C device handle");
+    } else {
+        // 使用外部提供的设备句柄
+        _dev = *i2c_device;
+        _owns_dev = false;
+        ESP_LOGD(TAG, "Using external I2C device handle");
     }
-    _owns_dev = true;
 
     // 设置初始化标志，这样I2C回调函数就可以工作了
     _initialized = true;
@@ -72,130 +86,56 @@ esp_err_t bmi270_tools::init(i2c_bus_handle_t bus, bool enable_magnetometer)
     esp_err_t id_ret = i2c_bus_read_byte(_dev, BMI2_CHIP_ID_ADDR, &raw_chip_id);
     if (id_ret != ESP_OK) {
         ESP_LOGE(TAG, "Pre-read CHIP_ID failed (i2c err=%s)", esp_err_to_name(id_ret));
-        deinit();
+        if (_owns_dev) deinit();
         return id_ret;
     }
     ESP_LOGI(TAG, "BMI270 pre-read CHIP_ID=0x%02X (expected 0x%02X)", raw_chip_id, BMI270_CHIP_ID);
     if (raw_chip_id != BMI270_CHIP_ID) {
         ESP_LOGE(TAG, "Unexpected CHIP_ID 0x%02X, abort init", raw_chip_id);
-        deinit();
+        if (_owns_dev) deinit();
         return ESP_ERR_NOT_FOUND;
     }
     _bmi270_dev.chip_id = raw_chip_id;
 
-
-    // 初始化 BMI270 Context 变体
-    ESP_LOGI(TAG, "Starting BMI270 Context initialization...");
+    // 根据选择的模式进行初始化
+    int8_t rslt = BMI2_OK;
+    const char* mode_name = "";
     
-    // 设置接口回调函数
-    _bmi270_dev.intf = BMI2_I2C_INTF;
-    _bmi270_dev.read = bmi2_i2c_read;
-    _bmi270_dev.write = bmi2_i2c_write;
-    _bmi270_dev.delay_us = delay_us;
-    _bmi270_dev.intf_ptr = this;
-    _bmi270_dev.config_file_ptr = NULL; // Context变体会使用内置配置
+    switch (_current_mode) {
+        case MODE_CONTEXT:
+            ESP_LOGI(TAG, "Starting BMI270 Context initialization...");
+            rslt = bmi270_context_init(&_bmi270_dev);
+            mode_name = "Context";
+            break;
+            
+        case MODE_BASE:
+            ESP_LOGI(TAG, "Starting BMI270 Base initialization...");
+            rslt = bmi270_init(&_bmi270_dev);
+            mode_name = "Base";
+            break;
+            
+        case MODE_LEGACY:
+        case MODE_MAXIMUM_FIFO:
+        default:
+            ESP_LOGE(TAG, "Unsupported BMI270 mode: %d", _current_mode);
+            if (_owns_dev) deinit();
+            return ESP_ERR_NOT_SUPPORTED;
+    }
     
-    int8_t rslt = bmi270_context_init(&_bmi270_dev);
     if (rslt != BMI2_OK) {
-        ESP_LOGE(TAG, "BMI270 Context initialization failed");
+        ESP_LOGE(TAG, "BMI270 %s initialization failed", mode_name);
         print_bmi2_api_error(rslt);
         _initialized = false; // 重置初始化标志
-        deinit();
+        if (_owns_dev) deinit();
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "BMI270 interface init success (addr=0x%02X, freq=%lu)", _addr, (unsigned long)_bus_freq);
+    ESP_LOGI(TAG, "BMI270 %s initialized successfully (addr=0x%02X, freq=%lu)", 
+             mode_name, _addr, (unsigned long)_bus_freq);
     
     // 如果启用磁力计，则自动配置BMM150
     if (enable_magnetometer) {
 
-        // 先启用内部上拉
-        uint8_t pupsel = BMI2_ASDA_PUPSEL_2K; // 2k 内部上拉
-        int8_t trim_rslt = bmi2_set_regs(BMI2_AUX_IF_TRIM, &pupsel, 1, &_bmi270_dev);
-        if (trim_rslt != BMI2_OK) {
-            ESP_LOGW(TAG, "Set internal AUX pull-up failed rslt=%d", trim_rslt);
-        } else {
-            ESP_LOGI(TAG, "Internal AUX pull-up enabled (2k)");
-        }
-
-        ESP_LOGI(TAG, "Auto configuring BMM150 magnetometer...");
-        int mag_ret = configure_magnetometer();
-        if (mag_ret == 0) {
-            ESP_LOGI(TAG, "BMM150 magnetometer configured successfully");
-        } else {
-            ESP_LOGW(TAG, "BMM150 magnetometer config failed: %d (continue BMI270 init)", mag_ret);
-        }
-    }
-    
-    return ESP_OK;
-}
-
-esp_err_t bmi270_tools::init(i2c_bus_handle_t bus, i2c_bus_device_handle_t *i2c_device, bool enable_magnetometer)
-{
-    if (_initialized) {
-        ESP_LOGW(TAG, "BMI270 already initialized @0x%02X", _addr);
-        return ESP_OK;
-    }
-    if (bus == nullptr || i2c_device == nullptr || *i2c_device == nullptr) {
-        ESP_LOGE(TAG, "Invalid I2C bus/device handle");
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    _bus = bus;
-    _dev = *i2c_device;
-    _owns_dev = false;
-
-    // 设置初始化标志，这样I2C回调函数就可以工作了
-    _initialized = true;
-
-    // 配置 BMI270 API 接口
-    _bmi270_dev.intf = BMI2_I2C_INTF;
-    _bmi270_dev.read = bmi2_i2c_read;
-    _bmi270_dev.write = bmi2_i2c_write;
-    _bmi270_dev.delay_us = delay_us;
-    _bmi270_dev.read_write_len = BMI270_READ_WRITE_LEN;
-    _bmi270_dev.config_file_ptr = NULL;
-    _bmi270_dev.intf_ptr = this;
-
-    // 预读芯片ID
-    uint8_t raw_chip_id = 0x00;
-    esp_err_t id_ret = i2c_bus_read_byte(_dev, BMI2_CHIP_ID_ADDR, &raw_chip_id);
-    if (id_ret != ESP_OK) {
-        ESP_LOGE(TAG, "Pre-read CHIP_ID failed (i2c err=%s)", esp_err_to_name(id_ret));
-        return id_ret;
-    }
-    ESP_LOGI(TAG, "BMI270 pre-read CHIP_ID=0x%02X (expected 0x%02X)", raw_chip_id, BMI270_CHIP_ID);
-    if (raw_chip_id != BMI270_CHIP_ID) {
-        ESP_LOGE(TAG, "Unexpected CHIP_ID 0x%02X, abort init", raw_chip_id);
-        return ESP_ERR_NOT_FOUND;
-    }
-    _bmi270_dev.chip_id = raw_chip_id;
-
-    // 使用 BMI270 Context 初始化
-    ESP_LOGI(TAG, "Starting BMI270 Context initialization...");
-    int8_t rslt = bmi270_context_init(&_bmi270_dev);
-    if (rslt != BMI2_OK) {
-        ESP_LOGE(TAG, "BMI270 Context initialization failed");
-        print_bmi2_api_error(rslt);
-        _initialized = false; // 重置初始化标志
-        return ESP_FAIL;
-    }
-
-    // // Maximum FIFO 变体初始化，提供 6KB FIFO，适合高频批量读取 TODO
-    // ESP_LOGI(TAG, "Starting BMI270 Maximum FIFO initialization...");
-    // int8_t rslt = bmi270_maximum_fifo_init(&_bmi270_dev);
-    // if (rslt != BMI2_OK) {
-    //     ESP_LOGE(TAG, "BMI270 Maximum FIFO initialization failed");
-    //     print_bmi2_api_error(rslt);
-    //     _initialized = false;
-    //     return ESP_FAIL;
-    // }
-    // ESP_LOGI(TAG, "BMI270 Maximum FIFO initialized successfully (addr=0x%02X)", _addr);
-
-    ESP_LOGI(TAG, "BMI270 Context initialized successfully (addr=0x%02X)", _addr);
-
-    // 如果启用磁力计，则自动配置BMM150
-    if (enable_magnetometer) {
         // 先启用内部上拉
         uint8_t pupsel = BMI2_ASDA_PUPSEL_2K; // 2k 内部上拉
         int8_t trim_rslt = bmi2_set_regs(BMI2_AUX_IF_TRIM, &pupsel, 1, &_bmi270_dev);
@@ -244,7 +184,24 @@ esp_err_t bmi270_tools::enable_sensors(const sensor_type_t *sensors, uint8_t cou
         _enabled_sensors_mask |= (uint64_t)1 << sens_list[i];
     }
 
-    int8_t rslt = bmi270_sensor_enable(sens_list, count, &_bmi270_dev);
+    // 根据当前模式调用相应的sensor enable函数
+    int8_t rslt = BMI2_OK;
+    switch (_current_mode) {
+        case MODE_CONTEXT:
+            rslt = bmi270_context_sensor_enable(sens_list, count, &_bmi270_dev);
+            break;
+            
+        case MODE_BASE:
+            rslt = bmi270_sensor_enable(sens_list, count, &_bmi270_dev);
+            break;
+            
+        case MODE_LEGACY:
+        case MODE_MAXIMUM_FIFO:
+        default:
+            ESP_LOGE(TAG, "Unsupported mode for sensor enable: %d", _current_mode);
+            return ESP_ERR_NOT_SUPPORTED;
+    }
+    
     if (rslt != BMI2_OK) {
         ESP_LOGE(TAG, "Failed to enable sensors");
         print_bmi2_api_error(rslt);
@@ -268,7 +225,24 @@ esp_err_t bmi270_tools::disable_sensors(const sensor_type_t *sensors, uint8_t co
         _enabled_sensors_mask &= ~((uint64_t)1 << sens_list[i]);
     }
 
-    int8_t rslt = bmi270_sensor_disable(sens_list, count, &_bmi270_dev);
+    // 根据当前模式调用相应的sensor disable函数
+    int8_t rslt = BMI2_OK;
+    switch (_current_mode) {
+        case MODE_CONTEXT:
+            rslt = bmi270_context_sensor_disable(sens_list, count, &_bmi270_dev);
+            break;
+            
+        case MODE_BASE:
+            rslt = bmi270_sensor_disable(sens_list, count, &_bmi270_dev);
+            break;
+            
+        case MODE_LEGACY:
+        case MODE_MAXIMUM_FIFO:
+        default:
+            ESP_LOGE(TAG, "Unsupported mode for sensor disable: %d", _current_mode);
+            return ESP_ERR_NOT_SUPPORTED;
+    }
+
     if (rslt != BMI2_OK) {
         ESP_LOGE(TAG, "Failed to disable sensors");
         print_bmi2_api_error(rslt);
@@ -305,8 +279,23 @@ esp_err_t bmi270_tools::configure_sensors(const sensor_config_t &config)
     sens_config[1].cfg.gyr.odr = (uint8_t)config.gyr_odr;
     sens_config[1].cfg.gyr.range = (uint8_t)config.gyr_range;
 
-    // 设置配置
-    rslt = bmi270_set_sensor_config(sens_config, 2, &_bmi270_dev);
+    // 根据当前模式调用相应的set sensor config函数
+    switch (_current_mode) {
+        case MODE_CONTEXT:
+            rslt = bmi270_context_set_sensor_config(sens_config, 2, &_bmi270_dev);
+            break;
+            
+        case MODE_BASE:
+            rslt = bmi270_set_sensor_config(sens_config, 2, &_bmi270_dev);
+            break;
+            
+        case MODE_LEGACY:
+        case MODE_MAXIMUM_FIFO:
+        default:
+            ESP_LOGE(TAG, "Unsupported mode for sensor config: %d", _current_mode);
+            return ESP_ERR_NOT_SUPPORTED;
+    }
+    
     if (rslt != BMI2_OK) {
         ESP_LOGE(TAG, "Failed to set sensor config");
         print_bmi2_api_error(rslt);
@@ -412,120 +401,6 @@ esp_err_t bmi270_tools::get_raw_sensor_data(struct bmi2_sens_data *data)
     return ESP_OK;
 }
 
-esp_err_t bmi270_tools::setup_motion_interrupt(const motion_config_t &config, int_pin_t pin)
-{
-    if (!_initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    // 启用加速度计和运动检测功能
-    uint8_t sens_list[] = {BMI2_ACCEL, BMI2_ANY_MOTION};
-    int8_t rslt = bmi270_sensor_enable(sens_list, 2, &_bmi270_dev);
-    if (rslt != BMI2_OK) {
-        ESP_LOGE(TAG, "Failed to enable motion detection");
-        print_bmi2_api_error(rslt);
-        return ESP_FAIL;
-    }
-
-    // 配置运动检测参数
-    struct bmi2_sens_config sens_config;
-    sens_config.type = BMI2_ANY_MOTION;
-
-    rslt = bmi270_get_sensor_config(&sens_config, 1, &_bmi270_dev);
-    if (rslt != BMI2_OK) {
-        ESP_LOGE(TAG, "Failed to get motion config");
-        print_bmi2_api_error(rslt);
-        return ESP_FAIL;
-    }
-
-    sens_config.cfg.any_motion.duration = config.duration;
-    sens_config.cfg.any_motion.threshold = config.threshold;
-
-    rslt = bmi270_set_sensor_config(&sens_config, 1, &_bmi270_dev);
-    if (rslt != BMI2_OK) {
-        ESP_LOGE(TAG, "Failed to set motion config");
-        print_bmi2_api_error(rslt);
-        return ESP_FAIL;
-    }
-
-    // 配置中断引脚
-    esp_err_t ret = configure_interrupt_pin(pin, false, true, true);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    // 映射中断
-    ret = map_feature_interrupt(BMI2_ANY_MOTION, pin);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "Motion interrupt configured (duration=%d, threshold=%d)", 
-             config.duration, config.threshold);
-    return ESP_OK;
-}
-
-esp_err_t bmi270_tools::setup_wrist_wear_interrupt(int_pin_t pin)
-{
-    if (!_initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    // 设置轴映射
-    struct bmi2_remap remapped_axis = { .x = BMI2_X, .y = BMI2_Y, .z = BMI2_Z };
-    remapped_axis.x = BMI2_X;
-    remapped_axis.y = BMI2_Y;
-    remapped_axis.z = BMI2_Z;
-
-    int8_t rslt = bmi2_set_remap_axes(&remapped_axis, &_bmi270_dev);
-    if (rslt != BMI2_OK) {
-        ESP_LOGE(TAG, "Failed to set axis remap");
-        print_bmi2_api_error(rslt);
-        return ESP_FAIL;
-    }
-
-    // 配置中断引脚
-    esp_err_t ret = configure_interrupt_pin(pin, true, false, true);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    // 映射手腕佩戴中断
-    ret = map_feature_interrupt(BMI2_WRIST_WEAR_WAKE_UP, pin);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "Wrist wear interrupt configured");
-    return ESP_OK;
-}
-
-esp_err_t bmi270_tools::disable_wrist_wear_interrupt()
-{
-    if (!_initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    // 禁用中断输出
-    struct bmi2_int_pin_config int_pin_cfg;
-    int_pin_cfg.pin_type = BMI2_INT_BOTH;
-    int_pin_cfg.int_latch = BMI2_INT_LATCH;
-    int_pin_cfg.pin_cfg[0].lvl = BMI2_INT_ACTIVE_LOW;
-    int_pin_cfg.pin_cfg[0].od = BMI2_INT_OPEN_DRAIN;
-    int_pin_cfg.pin_cfg[0].output_en = BMI2_INT_OUTPUT_DISABLE;
-    int_pin_cfg.pin_cfg[0].input_en = BMI2_INT_INPUT_DISABLE;
-
-    int8_t rslt = bmi2_set_int_pin_config(&int_pin_cfg, &_bmi270_dev);
-    if (rslt != BMI2_OK) {
-        ESP_LOGE(TAG, "Failed to disable wrist wear interrupt");
-        print_bmi2_api_error(rslt);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "Wrist wear interrupt disabled");
-    return ESP_OK;
-}
-
 bool bmi270_tools::check_interrupt_status()
 {
     if (!_initialized) {
@@ -538,24 +413,209 @@ bool bmi270_tools::check_interrupt_status()
         return false;
     }
 
-    // 检查手腕佩戴中断
+    bool interrupt_detected = false;
+
+    // 检查显著运动检测中断
+    if (int_status & BMI270_SIG_MOT_STATUS_MASK) {
+        ESP_LOGI(TAG, "Significant motion detected");
+        interrupt_detected = true;
+    }
+
+    // 检查计步器中断
+    if (int_status & BMI270_STEP_CNT_STATUS_MASK) {
+        ESP_LOGI(TAG, "Step counter interrupt");
+        interrupt_detected = true;
+    }
+
+    // 检查活动识别中断
+    if (int_status & BMI270_STEP_ACT_STATUS_MASK) {
+        ESP_LOGI(TAG, "Activity recognition interrupt");
+        interrupt_detected = true;
+    }
+
+    // 检查手腕唤醒中断
     if (int_status & BMI270_WRIST_WAKE_UP_STATUS_MASK) {
-        ESP_LOGW(TAG, "Wrist wear detected");
-        return true;
+        ESP_LOGI(TAG, "Wrist wake-up detected");
+        interrupt_detected = true;
     }
 
-    // 检查运动检测中断
+    // 检查手腕手势中断
+    if (int_status & BMI270_WRIST_GEST_STATUS_MASK) {
+        ESP_LOGI(TAG, "Wrist gesture detected");
+        interrupt_detected = true;
+    }
+
+    // 检查无运动检测中断
+    if (int_status & BMI270_NO_MOT_STATUS_MASK) {
+        ESP_LOGI(TAG, "No motion detected");
+        interrupt_detected = true;
+    }
+
+    // 检查任意运动检测中断
     if (int_status & BMI270_ANY_MOT_STATUS_MASK) {
-        ESP_LOGW(TAG, "Motion detected");
-        return true;
+        ESP_LOGI(TAG, "Any motion detected");
+        interrupt_detected = true;
     }
 
-    return false;
+    return interrupt_detected;
 }
 
 esp_err_t bmi270_tools::clear_interrupt()
 {
-    return configure_interrupt_pin(INT_PIN_BOTH, false, true, true);
+    if (!_initialized) {
+        ESP_LOGE(TAG, "BMI270 not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 根据BMI270官方API，读取中断状态寄存器会自动清除中断状态
+    // 这是BMI270芯片的硬件特性，不需要重新配置中断引脚
+    uint16_t int_status = 0;
+    int8_t rslt = bmi2_get_int_status(&int_status, &_bmi270_dev);
+    if (rslt != BMI2_OK) {
+        ESP_LOGE(TAG, "Failed to read interrupt status for clearing");
+        print_bmi2_api_error(rslt);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGD(TAG, "Interrupt status cleared: 0x%04X", int_status);
+    return ESP_OK;
+}
+
+esp_err_t bmi270_tools::enable_interrupt(int_pin_t pin, bool active_high, bool open_drain, bool latch)
+{
+    if (!_initialized) {
+        ESP_LOGE(TAG, "BMI270 not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    struct bmi2_int_pin_config pin_config = {};
+
+    // 配置中断引脚类型
+    pin_config.pin_type = pin;
+    
+    // 配置锁存模式
+    pin_config.int_latch = latch ? BMI2_INT_LATCH : BMI2_INT_NON_LATCH;
+
+    // 根据引脚类型配置相应的引脚参数
+    auto configure_pin = [&](uint8_t index) {
+        pin_config.pin_cfg[index].input_en = BMI2_INT_INPUT_DISABLE;
+        pin_config.pin_cfg[index].lvl = active_high ? BMI2_INT_ACTIVE_HIGH : BMI2_INT_ACTIVE_LOW;
+        pin_config.pin_cfg[index].od = open_drain ? BMI2_INT_OPEN_DRAIN : BMI2_INT_PUSH_PULL;
+        pin_config.pin_cfg[index].output_en = BMI2_INT_OUTPUT_ENABLE;
+    };
+
+    switch (pin) {
+        case INT_PIN_1:
+            configure_pin(0);
+            break;
+        case INT_PIN_2:
+            configure_pin(1);
+            break;
+        case INT_PIN_BOTH:
+            configure_pin(0);
+            configure_pin(1);
+            break;
+    }
+
+    int8_t rslt = bmi2_set_int_pin_config(&pin_config, &_bmi270_dev);
+    if (rslt != BMI2_OK) {
+        ESP_LOGE(TAG, "Failed to enable interrupt pin");
+        print_bmi2_api_error(rslt);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Interrupt enabled on pin %d (active_%s, %s, %s)", 
+             pin, active_high ? "high" : "low",
+             open_drain ? "open_drain" : "push_pull",
+             latch ? "latch" : "non_latch");
+
+    return ESP_OK;
+}
+
+esp_err_t bmi270_tools::disable_interrupt(int_pin_t pin)
+{
+    if (!_initialized) {
+        ESP_LOGE(TAG, "BMI270 not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    struct bmi2_int_pin_config pin_config = {};
+
+    // 配置中断引脚类型
+    pin_config.pin_type = pin;
+    pin_config.int_latch = BMI2_INT_NON_LATCH;
+
+    // 根据引脚类型禁用相应的引脚输出
+    auto disable_pin = [&](uint8_t index) {
+        pin_config.pin_cfg[index].input_en = BMI2_INT_INPUT_DISABLE;
+        pin_config.pin_cfg[index].lvl = BMI2_INT_ACTIVE_LOW;
+        pin_config.pin_cfg[index].od = BMI2_INT_OPEN_DRAIN;
+        pin_config.pin_cfg[index].output_en = BMI2_INT_OUTPUT_DISABLE;  // 关键：禁用输出
+    };
+
+    switch (pin) {
+        case INT_PIN_1:
+            disable_pin(0);
+            break;
+        case INT_PIN_2:
+            disable_pin(1);
+            break;
+        case INT_PIN_BOTH:
+            disable_pin(0);
+            disable_pin(1);
+            break;
+    }
+
+    int8_t rslt = bmi2_set_int_pin_config(&pin_config, &_bmi270_dev);
+    if (rslt != BMI2_OK) {
+        ESP_LOGE(TAG, "Failed to disable interrupt pin");
+        print_bmi2_api_error(rslt);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Interrupt disabled on pin %d", pin);
+    return ESP_OK;
+}
+
+esp_err_t bmi270_tools::map_interrupt_to_pin(uint8_t interrupt_type, int_pin_t pin)
+{
+    if (!_initialized) {
+        ESP_LOGE(TAG, "BMI270 not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    int8_t rslt = BMI2_OK;
+
+    // 根据中断类型选择不同的映射方式
+    switch (interrupt_type) {
+        case BMI2_DRDY_INT:
+            // 数据就绪中断使用专用函数
+            rslt = bmi2_map_data_int(BMI2_DRDY_INT, (enum bmi2_hw_int_pin)pin, &_bmi270_dev);
+            if (rslt != BMI2_OK) {
+                ESP_LOGE(TAG, "Failed to map data-ready interrupt to pin %d", pin);
+                print_bmi2_api_error(rslt);
+                return ESP_FAIL;
+            }
+            ESP_LOGI(TAG, "Data-ready interrupt mapped to pin %d", pin);
+            break;
+            
+        default:
+            // 特征中断（如 any-motion）使用 BMI270 特征映射函数
+            struct bmi2_sens_int_config sens_int = {
+                .type = interrupt_type,
+                .hw_int_pin = (enum bmi2_hw_int_pin)pin
+            };
+            rslt = bmi270_map_feat_int(&sens_int, 1, &_bmi270_dev);
+            if (rslt != BMI2_OK) {
+                ESP_LOGE(TAG, "Failed to map feature interrupt %d to pin %d", interrupt_type, pin);
+                print_bmi2_api_error(rslt);
+                return ESP_FAIL;
+            }
+            ESP_LOGI(TAG, "Feature interrupt %d mapped to pin %d", interrupt_type, pin);
+            break;
+    }
+
+    return ESP_OK;
 }
 
 float bmi270_tools::convert_accel_lsb_to_mg(int16_t lsb, accel_range_t range)
@@ -607,7 +667,7 @@ esp_err_t bmi270_tools::soft_reset()
         return ESP_ERR_INVALID_STATE;
     }
 
-    // 记录当前配置已保存在 _current_config / _enabled_sensors_mask
+    // 记录当前配置已保存在 _current_config / _enabled_sensors_mask / _current_mode
     int8_t rslt = bmi2_soft_reset(&_bmi270_dev);
     if (rslt != BMI2_OK) {
         ESP_LOGE(TAG, "Soft reset failed");
@@ -615,9 +675,28 @@ esp_err_t bmi270_tools::soft_reset()
         return ESP_FAIL;
     }
 
-    rslt = bmi270_context_init(&_bmi270_dev);
+    // 根据当前模式重新初始化
+    const char* mode_name = "";
+    switch (_current_mode) {
+        case MODE_CONTEXT:
+            rslt = bmi270_context_init(&_bmi270_dev);
+            mode_name = "Context";
+            break;
+            
+        case MODE_BASE:
+            rslt = bmi270_init(&_bmi270_dev);
+            mode_name = "Base";
+            break;
+            
+        case MODE_LEGACY:
+        case MODE_MAXIMUM_FIFO:
+        default:
+            ESP_LOGE(TAG, "Unsupported mode for soft reset: %d", _current_mode);
+            return ESP_ERR_NOT_SUPPORTED;
+    }
+    
     if (rslt != BMI2_OK) {
-        ESP_LOGE(TAG, "Re-init BMI270 Context after reset failed");
+        ESP_LOGE(TAG, "Re-init BMI270 %s after reset failed", mode_name);
         print_bmi2_api_error(rslt);
         return ESP_FAIL;
     }
@@ -628,7 +707,7 @@ esp_err_t bmi270_tools::soft_reset()
         ESP_LOGW(TAG, "State restore partial failure");
     }
 
-    ESP_LOGI(TAG, "Soft reset completed and state restored");
+    ESP_LOGI(TAG, "Soft reset completed and %s state restored", mode_name);
     return ESP_OK;
 }
 
@@ -645,8 +724,26 @@ esp_err_t bmi270_tools::restore_state_after_reset()
     if (_enabled_sensors_mask & (1ull << BMI2_GYRO))  sens_list[cnt++] = BMI2_GYRO;
     if (_enabled_sensors_mask & (1ull << BMI2_AUX))   sens_list[cnt++] = BMI2_AUX;
     if (cnt) {
-        int8_t rslt = bmi270_sensor_enable(sens_list, cnt, &_bmi270_dev);
+        // 根据当前模式调用相应的sensor enable函数
+        int8_t rslt = BMI2_OK;
+        switch (_current_mode) {
+            case MODE_CONTEXT:
+                rslt = bmi270_context_sensor_enable(sens_list, cnt, &_bmi270_dev);
+                break;
+                
+            case MODE_BASE:
+                rslt = bmi270_sensor_enable(sens_list, cnt, &_bmi270_dev);
+                break;
+                
+            case MODE_LEGACY:
+            case MODE_MAXIMUM_FIFO:
+            default:
+                ESP_LOGE(TAG, "Unsupported mode for restore sensors: %d", _current_mode);
+                return ESP_ERR_NOT_SUPPORTED;
+        }
+        
         if (rslt != BMI2_OK) {
+            ESP_LOGE(TAG, "Failed to restore sensor enable state");
             print_bmi2_api_error(rslt);
             return ESP_FAIL;
         }
@@ -847,35 +944,6 @@ int8_t bmi270_tools::bmm_i2c_write(uint8_t reg_addr, const uint8_t *aux_data, ui
 }
 
 // === 私有辅助函数实现 ===
-
-esp_err_t bmi270_tools::configure_interrupt_pin(int_pin_t pin, bool active_high, bool open_drain, bool latch)
-{
-    struct bmi2_int_pin_config int_pin_cfg = {};
-    int_pin_cfg.pin_type = static_cast<enum bmi2_hw_int_pin>(pin);
-    int_pin_cfg.int_latch = latch ? BMI2_INT_LATCH : BMI2_INT_NON_LATCH;
-
-    auto fill_cfg = [&](uint8_t index){
-        int_pin_cfg.pin_cfg[index].lvl = active_high ? BMI2_INT_ACTIVE_HIGH : BMI2_INT_ACTIVE_LOW;
-        int_pin_cfg.pin_cfg[index].od = open_drain ? BMI2_INT_OPEN_DRAIN : BMI2_INT_PUSH_PULL;
-        int_pin_cfg.pin_cfg[index].output_en = BMI2_INT_OUTPUT_ENABLE;
-        int_pin_cfg.pin_cfg[index].input_en = BMI2_INT_INPUT_DISABLE;
-    };
-
-    switch (pin) {
-        case INT_PIN_1: fill_cfg(0); break;
-        case INT_PIN_2: fill_cfg(1); break;
-        case INT_PIN_BOTH: fill_cfg(0); fill_cfg(1); break;
-    }
-
-    int8_t rslt = bmi2_set_int_pin_config(&int_pin_cfg, &_bmi270_dev);
-    if (rslt != BMI2_OK) {
-        ESP_LOGE(TAG, "Failed to configure interrupt pin");
-        print_bmi2_api_error(rslt);
-        return ESP_FAIL;
-    }
-
-    return ESP_OK;
-}
 
 esp_err_t bmi270_tools::map_feature_interrupt(uint8_t feature_type, int_pin_t pin)
 {

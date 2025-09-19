@@ -46,6 +46,14 @@
  */
 class bmi270_tools {
 public:
+    // BMI270变体模式枚举
+    enum bmi270_mode_t {
+        MODE_CONTEXT = 0,           // Context变体 - 轻量级，专注上下文感知
+        MODE_BASE = 1,              // Base/Traditional变体 - 完整功能集
+        MODE_LEGACY = 2,            // Legacy变体 - 兼容老版本，丰富检测功能
+        MODE_MAXIMUM_FIFO = 3       // Maximum FIFO变体 - 6KB大缓存
+    };
+
     // 传感器类型枚举
     enum sensor_type_t {
         SENSOR_ACCEL = BMI2_ACCEL,
@@ -225,12 +233,13 @@ public:
     ~bmi270_tools();
 
     /**
-     * @brief 初始化：基于外部 I2C Master Bus 创建设备句柄
+     * @brief 初始化BMI270传感器
      * @param bus I2C 主总线句柄
+     * @param i2c_device I2C设备句柄指针，如果为nullptr则自动创建设备句柄
      * @param enable_magnetometer 是否启用BMM150磁力计 (默认false)
+     * @param mode BMI270变体模式 (默认MODE_CONTEXT)
      */
-    esp_err_t init(i2c_bus_handle_t bus, bool enable_magnetometer = false);
-    esp_err_t init(i2c_bus_handle_t bus, i2c_bus_device_handle_t *i2c_device, bool enable_magnetometer = false);
+    esp_err_t init(i2c_bus_handle_t bus, i2c_bus_device_handle_t *i2c_device = nullptr, bool enable_magnetometer = false, bmi270_mode_t mode = MODE_CONTEXT);
 
     /**
      * @brief 去初始化：释放设备句柄
@@ -278,24 +287,6 @@ public:
 
     // === 中断和特殊功能 ===
     /**
-     * @brief 配置运动检测中断
-     * @param config 运动检测配置
-     * @param pin 中断引脚
-     */
-    esp_err_t setup_motion_interrupt(const motion_config_t &config, int_pin_t pin = INT_PIN_1);
-
-    /**
-     * @brief 配置手腕佩戴检测中断
-     * @param pin 中断引脚
-     */
-    esp_err_t setup_wrist_wear_interrupt(int_pin_t pin = INT_PIN_1);
-
-    /**
-     * @brief 禁用手腕佩戴检测中断
-     */
-    esp_err_t disable_wrist_wear_interrupt();
-
-    /**
      * @brief 检查中断状态
      * @return true 如果检测到中断
      */
@@ -305,6 +296,32 @@ public:
      * @brief 清除中断
      */
     esp_err_t clear_interrupt();
+
+    /**
+     * @brief 启用INT引脚中断输出
+     * @param pin 中断引脚选择
+     * @param active_high 中断输出电平 (true=高电平有效，false=低电平有效)
+     * @param open_drain 输出模式 (true=开漏输出，false=推挽输出)
+     * @param latch 锁存模式 (true=锁存直到读取，false=脉冲模式)
+     * @return ESP_OK 成功，其他值失败
+     */
+    esp_err_t enable_interrupt(int_pin_t pin = INT_PIN_1, bool active_high = false, 
+                              bool open_drain = true, bool latch = true);
+
+    /**
+     * @brief 禁用INT引脚中断输出
+     * @param pin 中断引脚选择
+     * @return ESP_OK 成功，其他值失败
+     */
+    esp_err_t disable_interrupt(int_pin_t pin = INT_PIN_1);
+
+    /**
+     * @brief 映射中断源到指定引脚（通用函数）
+     * @param interrupt_type 中断类型 (BMI2_DRDY_INT, BMI2_ANY_MOTION 等)
+     * @param pin 中断引脚选择
+     * @return ESP_OK 成功，其他值失败
+     */
+    esp_err_t map_interrupt_to_pin(uint8_t interrupt_type, int_pin_t pin);
 
     // === 实用功能 ===
     /**
@@ -408,7 +425,6 @@ private:
     static void delay_us(uint32_t period, void *intf_ptr);
 
     // 内部辅助函数
-    esp_err_t configure_interrupt_pin(int_pin_t pin, bool active_high = false, bool open_drain = true, bool latch = true);
     esp_err_t map_feature_interrupt(uint8_t feature_type, int_pin_t pin);
     static float lsb_to_mps2(int16_t val, float g_range, uint8_t bit_width);
     static void print_bmi2_api_error(int8_t rslt);
@@ -468,6 +484,7 @@ private:
     struct bmm150_settings _bmm150_mag_settings;    // BMM150 配置结构
     struct bmm150_mag_data _bmm150_mag_data;    // BMM150 磁力计数据结构
     sensor_config_t _current_config; // 当前配置
+    bmi270_mode_t _current_mode;     // 当前BMI270变体模式
     // 记录已启用的传感器选择掩码（bit = BMI2_*）供复位后恢复
     uint64_t _enabled_sensors_mask = 0;
 
