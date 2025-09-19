@@ -383,7 +383,10 @@ bool ic_rx8130_tools::setupInterrupt(gpio_num_t int_pin)
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_NEGEDGE,
+#if SOC_GPIO_SUPPORT_PIN_HYS_FILTER
         .hys_ctrl_mode = GPIO_HYS_SOFT_DISABLE
+#endif
+
     };
     
     esp_err_t ret = gpio_config(&io_conf);
