@@ -323,6 +323,13 @@ public:
      */
     esp_err_t map_interrupt_to_pin(uint8_t interrupt_type, int_pin_t pin);
 
+    /**
+     * @brief 配置any motion中断参数
+     * @param config any motion配置参数
+     * @return ESP_OK 成功，其他值失败
+     */
+    esp_err_t configure_any_motion(const motion_config_t &config);
+
     // === 实用功能 ===
     /**
      * @brief 转换加速度LSB到mg

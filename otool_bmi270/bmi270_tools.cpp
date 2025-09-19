@@ -586,35 +586,117 @@ esp_err_t bmi270_tools::map_interrupt_to_pin(uint8_t interrupt_type, int_pin_t p
 
     int8_t rslt = BMI2_OK;
 
-    // 根据中断类型选择不同的映射方式
-    switch (interrupt_type) {
-        case BMI2_DRDY_INT:
-            // 数据就绪中断使用专用函数
-            rslt = bmi2_map_data_int(BMI2_DRDY_INT, (enum bmi2_hw_int_pin)pin, &_bmi270_dev);
-            if (rslt != BMI2_OK) {
-                ESP_LOGE(TAG, "Failed to map data-ready interrupt to pin %d", pin);
-                print_bmi2_api_error(rslt);
-                return ESP_FAIL;
-            }
-            ESP_LOGI(TAG, "Data-ready interrupt mapped to pin %d", pin);
+    // 统一使用特征中断映射，避免BMI2_ANY_MOTION与BMI2_DRDY_INT值冲突问题
+    struct bmi2_sens_int_config sens_int = {
+        .type = interrupt_type,
+        .hw_int_pin = (enum bmi2_hw_int_pin)pin
+    };
+    
+    // 根据当前模式选择正确的映射函数
+    switch (_current_mode) {
+        case MODE_CONTEXT:
+            rslt = bmi270_context_map_feat_int(&sens_int, 1, &_bmi270_dev);
             break;
             
-        default:
-            // 特征中断（如 any-motion）使用 BMI270 特征映射函数
-            struct bmi2_sens_int_config sens_int = {
-                .type = interrupt_type,
-                .hw_int_pin = (enum bmi2_hw_int_pin)pin
-            };
+        case MODE_BASE:
             rslt = bmi270_map_feat_int(&sens_int, 1, &_bmi270_dev);
-            if (rslt != BMI2_OK) {
-                ESP_LOGE(TAG, "Failed to map feature interrupt %d to pin %d", interrupt_type, pin);
-                print_bmi2_api_error(rslt);
-                return ESP_FAIL;
-            }
-            ESP_LOGI(TAG, "Feature interrupt %d mapped to pin %d", interrupt_type, pin);
             break;
+            
+        case MODE_LEGACY:
+        case MODE_MAXIMUM_FIFO:
+        default:
+            ESP_LOGE(TAG, "Unsupported mode for feature interrupt mapping: %d", _current_mode);
+            return ESP_ERR_NOT_SUPPORTED;
+    }
+    
+    if (rslt != BMI2_OK) {
+        ESP_LOGE(TAG, "Failed to map feature interrupt %d to pin %d", interrupt_type, pin);
+        print_bmi2_api_error(rslt);
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "Feature interrupt %d (%s) mapped to pin %d", 
+             interrupt_type, 
+             (interrupt_type == BMI2_ANY_MOTION) ? "ANY_MOTION" :
+             (interrupt_type == BMI2_NO_MOTION) ? "NO_MOTION" :
+             (interrupt_type == BMI2_SIG_MOTION) ? "SIG_MOTION" : "OTHER", 
+             pin);
+
+    return ESP_OK;
+}
+
+esp_err_t bmi270_tools::configure_any_motion(const motion_config_t &config)
+{
+    if (!_initialized) {
+        ESP_LOGE(TAG, "BMI270 not initialized");
+        return ESP_ERR_INVALID_STATE;
     }
 
+    ESP_LOGI(TAG, "Configuring any-motion detection with duration=%u, threshold=%u", config.duration, config.threshold);
+
+    // 创建传感器配置结构
+    struct bmi2_sens_config sens_config = {0};
+    sens_config.type = BMI2_ANY_MOTION;
+
+    // 创建中断引脚配置结构
+    struct bmi2_int_pin_config pin_config = {0};
+
+    int8_t rslt = BMI2_OK;
+
+    // 根据当前模式获取传感器配置
+    switch (_current_mode) {
+        case MODE_CONTEXT:
+            rslt = bmi270_context_get_sensor_config(&sens_config, 1, &_bmi270_dev);
+            break;
+        case MODE_BASE:
+            rslt = bmi270_get_sensor_config(&sens_config, 1, &_bmi270_dev);
+            break;
+        case MODE_LEGACY:
+        case MODE_MAXIMUM_FIFO:
+        default:
+            ESP_LOGE(TAG, "Unsupported mode for any-motion configuration: %d", _current_mode);
+            return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    if (rslt != BMI2_OK) {
+        ESP_LOGE(TAG, "Failed to get default any-motion configuration");
+        print_bmi2_api_error(rslt);
+        return ESP_FAIL;
+    }
+
+    // 获取中断引脚配置
+    rslt = bmi2_get_int_pin_config(&pin_config, &_bmi270_dev);
+    if (rslt != BMI2_OK) {
+        ESP_LOGE(TAG, "Failed to get interrupt pin configuration");
+        print_bmi2_api_error(rslt);
+        return ESP_FAIL;
+    }
+
+    // 配置any-motion参数
+    sens_config.cfg.any_motion.duration = config.duration;
+    sens_config.cfg.any_motion.threshold = config.threshold;
+
+    // 设置传感器配置
+    switch (_current_mode) {
+        case MODE_CONTEXT:
+            rslt = bmi270_context_set_sensor_config(&sens_config, 1, &_bmi270_dev);
+            break;
+        case MODE_BASE:
+            rslt = bmi270_set_sensor_config(&sens_config, 1, &_bmi270_dev);
+            break;
+        case MODE_LEGACY:
+        case MODE_MAXIMUM_FIFO:
+        default:
+            ESP_LOGE(TAG, "Unsupported mode for any-motion configuration: %d", _current_mode);
+            return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    if (rslt != BMI2_OK) {
+        ESP_LOGE(TAG, "Failed to set any-motion configuration");
+        print_bmi2_api_error(rslt);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Any-motion configuration applied successfully");
     return ESP_OK;
 }
 
