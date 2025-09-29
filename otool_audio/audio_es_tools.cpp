@@ -8,7 +8,14 @@
 #include "audio_config.h"
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
-#include "esp_codec_dev_defaults.h"
+#include "freertos/task.h"
+#include <stdio.h>
+#include <errno.h>
+#include <string.h>
+#include <stdlib.h>
+#include <string>
+#include <new>
+#include <sys/stat.h>
 
 #ifdef USE_PCM_TEST_A
 // test_a.pcm 可用时的处理逻辑
@@ -29,6 +36,80 @@ extern const uint8_t _binary_sine_440Hz_30s_44100Hz_16bit_1ch_pcm_end[];
 #endif
 
 static const char *TAG = "audio_es_tools";
+
+// 确保输出文件的父目录存在，如果不存在则递归创建
+static esp_err_t ensure_parent_directories(const char* filepath)
+{
+    if (!filepath) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const char* last_slash = strrchr(filepath, '/');
+    if (!last_slash) {
+        return ESP_OK; // 没有目录部分
+    }
+
+    size_t dir_len = static_cast<size_t>(last_slash - filepath);
+    if (dir_len == 0) {
+        return ESP_OK; // 根目录，无需创建
+    }
+
+    std::string dir_path(filepath, dir_len);
+    if (dir_path.empty() || dir_path == "." || dir_path == "/") {
+        return ESP_OK;
+    }
+
+    std::string current_path;
+    size_t index = 0;
+    if (!dir_path.empty() && dir_path[0] == '/') {
+        current_path = "/";
+        index = 1;
+    }
+
+    while (index <= dir_path.size()) {
+        size_t next_sep = dir_path.find('/', index);
+        size_t fragment_len = (next_sep == std::string::npos) ? (dir_path.size() - index) : (next_sep - index);
+        std::string fragment = dir_path.substr(index, fragment_len);
+
+        if (!fragment.empty()) {
+            if (!current_path.empty() && current_path.back() != '/') {
+                current_path += '/';
+            }
+            current_path += fragment;
+
+            struct stat st {};
+            if (stat(current_path.c_str(), &st) == 0) {
+                if (!S_ISDIR(st.st_mode)) {
+                    ESP_LOGE(TAG, "%s exists but is not a directory", current_path.c_str());
+                    return ESP_ERR_INVALID_STATE;
+                }
+            } else {
+                if (mkdir(current_path.c_str(), 0775) != 0) {
+                    if (errno == EEXIST) {
+                        continue;
+                    }
+
+                    if (stat(current_path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+                        continue;
+                    }
+
+                    ESP_LOGE(TAG, "Failed to create directory %s (errno=%d, %s)",
+                             current_path.c_str(), errno, strerror(errno));
+                    return ESP_FAIL;
+                }
+
+                ESP_LOGI(TAG, "Created directory: %s", current_path.c_str());
+            }
+        }
+
+        if (next_sep == std::string::npos) {
+            break;
+        }
+        index = next_sep + 1;
+    }
+
+    return ESP_OK;
+}
 
 /**
  * 音频系统架构说明：
@@ -109,6 +190,7 @@ audio_es_tools::audio_es_tools()
     
     // 初始化默认麦克风通道配置
     mic_channels = AUDIO_MIC_CHANNEL_12;
+    playback_task_handle = nullptr;
 }
 
 // 构造函数（带参数）
@@ -148,11 +230,18 @@ audio_es_tools::audio_es_tools(gpio_num_t bck_pin, gpio_num_t mck_pin, gpio_num_
     
     // 初始化默认麦克风通道配置
     mic_channels = AUDIO_MIC_CHANNEL_123;
+    playback_task_handle = nullptr;
 }
 
 // 析构函数
 audio_es_tools::~audio_es_tools()
 {
+    if (playback_task_handle) {
+        ESP_LOGW(TAG, "Waiting for playback task to finish before destruction");
+        while (playback_task_handle) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
     ESP_LOGI(TAG, "audio_es_tools object destroyed");
     // 清理音频资源
     audio_system_deinit();
@@ -1042,7 +1131,7 @@ bool audio_es_tools::is_audio_file_available(audio_file_type_t audio_type) const
     }
 }
 
-esp_err_t audio_es_tools::play_audio_file(audio_file_type_t audio_type)
+esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type)
 {
     // 边界检查
     if (audio_type < 0 || audio_type >= AUDIO_FILE_MAX) {
@@ -1148,6 +1237,51 @@ esp_err_t audio_es_tools::play_audio_file(audio_file_type_t audio_type)
 
     ESP_LOGI(TAG, "Audio playbook completed successfully");
     return ESP_OK;
+}
+
+esp_err_t audio_es_tools::play_audio_file(audio_file_type_t audio_type, audio_playback_mode_t mode)
+{
+    if (mode == AUDIO_PLAYBACK_BLOCKING) {
+        return play_audio_file_impl(audio_type);
+    }
+
+    if (playback_task_handle) {
+        ESP_LOGW(TAG, "Playback task already running");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    playback_task_args* args = new (std::nothrow) playback_task_args{this, audio_type};
+    if (!args) {
+        ESP_LOGE(TAG, "Failed to allocate playback task args");
+        return ESP_ERR_NO_MEM;
+    }
+
+    BaseType_t task_ret = xTaskCreate(playback_task_entry, "audio_play_task", 4096, args, 5, &playback_task_handle);
+    if (task_ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create playback task");
+        delete args;
+        playback_task_handle = nullptr;
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Async playback task started for %s", get_audio_file_name(audio_type));
+    return ESP_OK;
+}
+
+void audio_es_tools::playback_task_entry(void* param)
+{
+    auto* args = static_cast<playback_task_args*>(param);
+    audio_es_tools* instance = args->instance;
+    audio_file_type_t audio_type = args->audio_type;
+    delete args;
+
+    esp_err_t result = instance->play_audio_file_impl(audio_type);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Async playback failed for %s: %s", instance->get_audio_file_name(audio_type), esp_err_to_name(result));
+    }
+
+    instance->playback_task_handle = nullptr;
+    vTaskDelete(nullptr);
 }
 
 esp_err_t audio_es_tools::clear_audio_pipeline(uint32_t silence_duration_ms)
@@ -1379,4 +1513,125 @@ int audio_es_tools::count_selected_mics() const
         v >>= 1;
     }
     return cnt;
+}
+
+esp_err_t audio_es_tools::record_to_file(const char* filepath, uint32_t record_duration_seconds, size_t chunk_size)
+{
+    if (!system_initialized || !es7210_initialized || !record_dev) {
+        ESP_LOGE(TAG, "Audio recording path not ready (system:%d, es7210:%d, dev:%p)",
+                 system_initialized, es7210_initialized, record_dev);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (filepath == nullptr || filepath[0] == '\0' || record_duration_seconds == 0) {
+        ESP_LOGE(TAG, "Invalid arguments: filepath=%p, duration=%lu", filepath, record_duration_seconds);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint32_t channels = (audio_channels == AUDIO_CHANNELS_MONO) ? 1u : 2u;
+    uint32_t bits = static_cast<uint32_t>(bits_per_sample);
+    uint32_t sample_rate_hz = static_cast<uint32_t>(sample_rate);
+    uint32_t bytes_per_sample = (bits * channels) / 8;
+
+    if (bytes_per_sample == 0 || sample_rate_hz == 0) {
+        ESP_LOGE(TAG, "Invalid audio format: sr=%u, bits=%u, channels=%u", sample_rate_hz, bits, channels);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint64_t total_bytes_64 = static_cast<uint64_t>(sample_rate_hz) * record_duration_seconds * bytes_per_sample;
+    if (total_bytes_64 == 0) {
+        ESP_LOGE(TAG, "Calculated recording size is zero");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (total_bytes_64 > SIZE_MAX) {
+        ESP_LOGE(TAG, "Requested recording exceeds size_t capacity: %llu bytes", (unsigned long long)total_bytes_64);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    size_t total_bytes = static_cast<size_t>(total_bytes_64);
+    size_t frame_size = bytes_per_sample;
+    if (chunk_size < frame_size) {
+        ESP_LOGW(TAG, "chunk_size %zu too small, adjusting to frame size %zu", chunk_size, frame_size);
+        chunk_size = frame_size;
+    }
+
+    size_t aligned_chunk = (chunk_size / frame_size) * frame_size;
+    if (aligned_chunk == 0) {
+        aligned_chunk = frame_size;
+    }
+    if (aligned_chunk != chunk_size) {
+        ESP_LOGW(TAG, "Aligning chunk size from %zu to %zu to match frame size", chunk_size, aligned_chunk);
+        chunk_size = aligned_chunk;
+    }
+
+    esp_err_t dir_ret = ensure_parent_directories(filepath);
+    if (dir_ret != ESP_OK) {
+        return dir_ret;
+    }
+
+    uint8_t* chunk_buffer = static_cast<uint8_t*>(malloc(chunk_size));
+    if (!chunk_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate chunk buffer: %zu bytes", chunk_size);
+        return ESP_ERR_NO_MEM;
+    }
+
+    FILE* file = fopen(filepath, "wb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open %s for writing (errno=%d, %s)", filepath, errno, strerror(errno));
+        free(chunk_buffer);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Recording %u Hz, %u-bit, %u-ch audio for %lu s -> %zu bytes into %s",
+             sample_rate_hz, bits, channels, record_duration_seconds, total_bytes, filepath);
+
+    size_t bytes_written = 0;
+    esp_err_t ret = ESP_OK;
+    TickType_t start_ticks = xTaskGetTickCount();
+
+    while (bytes_written < total_bytes) {
+        size_t remaining = total_bytes - bytes_written;
+        size_t to_read = (chunk_size < remaining) ? chunk_size : remaining;
+        ret = esp_codec_dev_read(record_dev, chunk_buffer, static_cast<int>(to_read));
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Record read error at %zu/%zu bytes: %s", bytes_written, total_bytes, esp_err_to_name(ret));
+            break;
+        }
+
+        size_t written = fwrite(chunk_buffer, 1, to_read, file);
+        if (written != to_read) {
+            ESP_LOGE(TAG, "File write error at %zu/%zu bytes (written %zu)", bytes_written, total_bytes, written);
+            ret = ESP_FAIL;
+            break;
+        }
+
+        bytes_written += written;
+    }
+
+    fflush(file);
+    fclose(file);
+    free(chunk_buffer);
+
+    TickType_t elapsed_ticks = xTaskGetTickCount() - start_ticks;
+    uint32_t elapsed_ms = pdTICKS_TO_MS(elapsed_ticks);
+    ESP_LOGI(TAG, "Recording loop elapsed %u ms", elapsed_ms);
+
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    if (bytes_written == 0) {
+        ESP_LOGE(TAG, "No audio captured, deleting %s", filepath);
+        remove(filepath);
+        return ESP_FAIL;
+    }
+
+    if (bytes_written < total_bytes) {
+        ESP_LOGW(TAG, "Recording stopped early: saved %zu/%zu bytes", bytes_written, total_bytes);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    ESP_LOGI(TAG, "Recording saved successfully: %s (%zu bytes)", filepath, bytes_written);
+    return ESP_OK;
 }

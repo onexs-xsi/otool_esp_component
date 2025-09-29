@@ -139,6 +139,7 @@ esp_err_t audio_es_tools::es7210_init(audio_mic_channel_t mic_channels)
         return ret;
     }
     
+    this->mic_channels = mic_channels;
     es7210_initialized = true;
     incr_i2s_user();
     es7210_sleeping = false;

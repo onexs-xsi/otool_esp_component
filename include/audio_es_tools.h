@@ -53,6 +53,16 @@ typedef enum {
 } audio_file_type_t;
 
 /**
+ * @brief 音频播放模式
+ *
+ * 决定播放接口是阻塞执行还是创建后台任务异步播放
+ */
+typedef enum {
+    AUDIO_PLAYBACK_BLOCKING = 0, ///< 阻塞播放，函数调用完成后表示播放已结束
+    AUDIO_PLAYBACK_ASYNC         ///< 异步播放，立即返回并在后台任务中完成播放
+} audio_playback_mode_t;
+
+/**
  * @brief 音频声道枚举
  * 
  * 定义音频声道配置
@@ -163,6 +173,7 @@ private:
     bool i2s_cross_data_pins = true;        ///< 是否使用交叉数据引脚映射（硬件走线导致）
     bool pins_high_z_on_sleep = false;      ///< 进入睡眠时是否将 I2S 与 PA 引脚置为高阻
     bool suppress_release = false;          ///< 在系统整体去初始化期间暂缓 I2S 释放
+    TaskHandle_t playback_task_handle = nullptr;   ///< 异步播放任务句柄
     
     // I2S 通道配置参数
     i2s_port_t i2s_port_num = I2S_NUM_0;                        ///< I2S通道编号
@@ -177,11 +188,18 @@ private:
     // ES7210 麦克风通道配置
     audio_mic_channel_t mic_channels = AUDIO_MIC_CHANNEL_1;   ///< 默认使用麦克风通道1
 
+    struct playback_task_args {
+        audio_es_tools* instance;
+        audio_file_type_t audio_type;
+    };
+
     // 内部辅助函数
     esp_err_t ensure_i2s_channel();         ///< 确保已创建 I2S 通道
     void try_release_i2s();                 ///< 在引用计数为 0 时释放 I2S 通道
     void incr_i2s_user();                   ///< 增加 I2S 使用者计数
     void decr_i2s_user();                   ///< 减少 I2S 使用者计数
+    esp_err_t play_audio_file_impl(audio_file_type_t audio_type); ///< 内部播放实现
+    static void playback_task_entry(void* param);                ///< 异步播放任务入口
 
 public:
     /**
@@ -359,12 +377,36 @@ public:
     esp_err_t record_and_playback_test(uint32_t record_duration_seconds = 5, bool loop_playback = false);
 
     /**
+     * @brief 将录音数据保存到指定文件
+     *
+     * 在当前音频配置下采集指定时长的原始 PCM 数据，并写入到已经挂载的文件系统路径。
+     * @param filepath 目标文件的完整路径（例如 "/sdcard/recordings/test.pcm"）
+     * @param record_duration_seconds 录音时长（秒）
+     * @param chunk_size 每次从编解码器读取并写入文件的字节数，默认 4096
+     * @return esp_err_t
+     *         - ESP_OK：录音成功写入文件
+     *         - ESP_ERR_INVALID_STATE：音频系统或录音设备未初始化
+     *         - ESP_ERR_INVALID_ARG：参数非法
+     *         - ESP_ERR_TIMEOUT：录音在预期时间内未完成，文件为部分内容
+     *         - 其他：底层 I/O 或驱动错误
+     */
+    esp_err_t record_to_file(const char* filepath, uint32_t record_duration_seconds, size_t chunk_size = 4096);
+
+    /**
      * @brief 播放指定类型的音频文件
      * 
      * @param audio_type 要播放的音频文件类型
+    * @param wait_for_completion 为 true 时在当前线程阻塞直至播放完成；为 false 时创建独立任务异步播放
      * @return esp_err_t 返回操作结果
      */
-    esp_err_t play_audio_file(audio_file_type_t audio_type);
+    esp_err_t play_audio_file(audio_file_type_t audio_type, audio_playback_mode_t mode = AUDIO_PLAYBACK_BLOCKING);
+
+    /**
+    * @brief 查询是否存在正在运行的异步播放任务
+    *
+    * @return bool 返回异步播放任务是否正在运行
+    */
+    bool is_async_playback_running() const { return playback_task_handle != nullptr; }
 
     /**
      * @brief 清理音频播放管道，发送静音数据清除残留音频
