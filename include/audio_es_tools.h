@@ -47,6 +47,7 @@
 typedef enum {
     AUDIO_FILE_TEST_A = 0,    ///< 测试音频文件A (test_a.pcm)
     AUDIO_FILE_TEST_B,        ///< 测试音频文件B (test_b.pcm)
+    AUDIO_FILE_STARTUP_1CH,   ///< 启动音频文件 (startup_1ch.pcm)
     AUDIO_FILE_SINE_440HZ,    ///< 440Hz正弦波音频文件 (sine_440Hz_30s_44100Hz_16bit_1ch.pcm)
     AUDIO_FILE_AUTO,          ///< 自动选择可用的音频文件
     AUDIO_FILE_MAX            ///< 枚举最大值（用于边界检查）
@@ -491,6 +492,13 @@ public:
      * @return bool 返回PCM测试文件B的可用状态
      */
     bool is_pcm_test_b_available() const;
+
+    /**
+     * @brief 检查PCM启动音频文件是否可用
+     * 
+     * @return bool 返回PCM启动音频文件的可用状态
+     */
+    bool is_pcm_startup_1ch_available() const;
 
     /**
      * @brief 检查PCM 440Hz正弦波文件是否可用

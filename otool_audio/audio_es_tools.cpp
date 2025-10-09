@@ -35,6 +35,12 @@ extern const uint8_t _binary_sine_440Hz_30s_44100Hz_16bit_1ch_pcm_start[];
 extern const uint8_t _binary_sine_440Hz_30s_44100Hz_16bit_1ch_pcm_end[];
 #endif
 
+#ifdef USE_PCM_STARTUP_1CH
+// startup_1ch.pcm 可用时的处理逻辑
+extern const uint8_t _binary_startup_1ch_pcm_start[];
+extern const uint8_t _binary_startup_1ch_pcm_end[];
+#endif
+
 static const char *TAG = "audio_es_tools";
 
 // 确保输出文件的父目录存在，如果不存在则递归创建
@@ -1080,6 +1086,15 @@ bool audio_es_tools::is_pcm_sine_440hz_available() const
 #endif
 }
 
+bool audio_es_tools::is_pcm_startup_1ch_available() const
+{
+#ifdef USE_PCM_STARTUP_1CH
+    return true;
+#else
+    return false;
+#endif
+}
+
 int audio_es_tools::get_available_pcm_count() const
 {
     int count = 0;
@@ -1089,6 +1104,10 @@ int audio_es_tools::get_available_pcm_count() const
 #endif
 
 #ifdef USE_PCM_TEST_B
+    count++;
+#endif
+
+#ifdef USE_PCM_STARTUP_1CH
     count++;
 #endif
 
@@ -1106,6 +1125,8 @@ const char* audio_es_tools::get_audio_file_name(audio_file_type_t audio_type) co
             return "test_a.pcm";
         case AUDIO_FILE_TEST_B:
             return "test_b.pcm";
+        case AUDIO_FILE_STARTUP_1CH:
+            return "startup_1ch.pcm";
         case AUDIO_FILE_SINE_440HZ:
             return "sine_440Hz_30s_44100Hz_16bit_1ch.pcm";
         case AUDIO_FILE_AUTO:
@@ -1122,6 +1143,8 @@ bool audio_es_tools::is_audio_file_available(audio_file_type_t audio_type) const
             return is_pcm_test_a_available();
         case AUDIO_FILE_TEST_B:
             return is_pcm_test_b_available();
+        case AUDIO_FILE_STARTUP_1CH:
+            return is_pcm_startup_1ch_available();
         case AUDIO_FILE_SINE_440HZ:
             return is_pcm_sine_440hz_available();
         case AUDIO_FILE_AUTO:
@@ -1169,6 +1192,8 @@ esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type)
             selected_type = AUDIO_FILE_TEST_A;
         } else if (is_pcm_test_b_available()) {
             selected_type = AUDIO_FILE_TEST_B;
+        } else if (is_pcm_startup_1ch_available()) {
+            selected_type = AUDIO_FILE_STARTUP_1CH;
         } else if (is_pcm_sine_440hz_available()) {
             selected_type = AUDIO_FILE_SINE_440HZ;
         } else {
@@ -1196,6 +1221,16 @@ esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type)
             pcm_len = _binary_test_b_pcm_end - _binary_test_b_pcm_start;
 #else
             ESP_LOGE(TAG, "test_b.pcm not compiled in");
+            return ESP_ERR_NOT_SUPPORTED;
+#endif
+            break;
+
+        case AUDIO_FILE_STARTUP_1CH:
+#ifdef USE_PCM_STARTUP_1CH
+            pcm_start = _binary_startup_1ch_pcm_start;
+            pcm_len = _binary_startup_1ch_pcm_end - _binary_startup_1ch_pcm_start;
+#else
+            ESP_LOGE(TAG, "startup_1ch.pcm not compiled in");
             return ESP_ERR_NOT_SUPPORTED;
 #endif
             break;

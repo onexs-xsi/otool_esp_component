@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: MIT
 
 # 定义PCM文件控制选项
-option(ENABLE_PCM_TEST_A "Enable embedding test_a.pcm file" ON)
+option(ENABLE_PCM_TEST_A "Enable embedding test_a.pcm file" OFF)
 option(ENABLE_PCM_TEST_B "Enable embedding test_b.pcm file" OFF)
-option(ENABLE_PCM_SINE_440HZ "Enable embedding sine_440Hz_30s_44100Hz_16bit_1ch.pcm file" ON)
+option(ENABLE_PCM_STARTUP_1CH "Enable embedding startup_1ch.pcm file" ON)
+option(ENABLE_PCM_SINE_440HZ "Enable embedding sine_440Hz_30s_44100Hz_16bit_1ch.pcm file" OFF)
 
 # 动态构建EMBED_FILES列表和编译定义
 set(EMBED_FILE_LIST "")
@@ -23,6 +24,11 @@ endif()
 if(ENABLE_PCM_SINE_440HZ)
     list(APPEND EMBED_FILE_LIST "otool_audio/sine_440Hz_30s_44100Hz_16bit_1ch.pcm")
     list(APPEND COMPILE_DEFS "USE_PCM_SINE_440HZ")
+endif()
+
+if(ENABLE_PCM_STARTUP_1CH)
+    list(APPEND EMBED_FILE_LIST "otool_audio/startup_1ch.pcm")
+    list(APPEND COMPILE_DEFS "USE_PCM_STARTUP_1CH")
 endif()
 
 # 动态添加BMI270和BMM150传感器API源文件
