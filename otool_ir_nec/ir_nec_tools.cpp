@@ -405,13 +405,8 @@ void ir_nec_tools::rx_task(void *pvParameters) {
     while (!instance->rx_task_should_exit) {
         // 等待接收完成，使用较短的超时以便能及时响应退出信号
         if (xQueueReceive(instance->receive_queue, &rx_data, pdMS_TO_TICKS(100)) == pdPASS) {
-            // 解析接收到的数据
-            if (instance->parse_nec_frame(rx_data.received_symbols, rx_data.num_symbols)) {
-                // 解析成功，调用回调函数
-                if (instance->receive_callback) {
-                    instance->receive_callback(instance->last_address, instance->last_command, false);
-                }
-            }
+            // 解析接收到的数据（parse_nec_frame内部会调用回调函数）
+            instance->parse_nec_frame(rx_data.received_symbols, rx_data.num_symbols);
             
             // 重新开始接收
             if (!instance->rx_task_should_exit) {
@@ -430,63 +425,134 @@ void ir_nec_tools::rx_task(void *pvParameters) {
 }
 
 bool ir_nec_tools::parse_nec_frame(rmt_symbol_word_t *symbols, size_t symbol_num) {
-    switch (symbol_num) {
-    case 34: // NEC 正常帧
-        {
-            rmt_symbol_word_t *cur = symbols;
-            uint16_t address = 0;
-            uint16_t command = 0;
-            
-            // 检查前导码
-            bool valid_leading_code = check_in_range(cur->duration0, NEC_LEADING_CODE_DURATION_0) &&
-                                      check_in_range(cur->duration1, NEC_LEADING_CODE_DURATION_1);
-            if (!valid_leading_code) {
-                return false;
-            }
-            cur++;
-            
-            // 解析16位地址
-            for (int i = 0; i < 16; i++) {
-                if (parse_logic1(cur)) {
-                    address |= 1 << i;
-                } else if (parse_logic0(cur)) {
-                    address &= ~(1 << i);
-                } else {
-                    return false;
-                }
-                cur++;
-            }
-            
-            // 解析16位命令
-            for (int i = 0; i < 16; i++) {
-                if (parse_logic1(cur)) {
-                    command |= 1 << i;
-                } else if (parse_logic0(cur)) {
-                    command &= ~(1 << i);
-                } else {
-                    return false;
-                }
-                cur++;
-            }
-            
-            // 保存地址和命令
-            last_address = address;
-            last_command = command;
-            return true;
-        }
-    case 2: // NEC 重复帧
+    // 处理重复帧
+    if (symbol_num == 2) {
         if (parse_repeat_frame(symbols)) {
             if (receive_callback) {
                 receive_callback(last_address, last_command, true);
             }
             return true;
         }
-        break;
-    default:
-        ESP_LOGW(IR_TAG, "Unknown NEC frame with %d symbols", symbol_num);
-        break;
+        return false;
     }
-    return false;
+    
+    // 处理正常帧（至少需要：1个前导码 + 16位地址 = 17个符号）
+    if (symbol_num < 17) {
+        ESP_LOGW(IR_TAG, "Frame too short: %d symbols (minimum 17)", symbol_num);
+        return false;
+    }
+    
+    rmt_symbol_word_t *cur = symbols;
+    
+    // 检查前导码
+    bool valid_leading_code = check_in_range(cur->duration0, NEC_LEADING_CODE_DURATION_0) &&
+                              check_in_range(cur->duration1, NEC_LEADING_CODE_DURATION_1);
+    if (!valid_leading_code) {
+        ESP_LOGW(IR_TAG, "Invalid leading code: D0=%u (expect %d), D1=%u (expect %d)",
+                 cur->duration0, NEC_LEADING_CODE_DURATION_0,
+                 cur->duration1, NEC_LEADING_CODE_DURATION_1);
+        return false;
+    }
+    cur++;
+    
+    // 解析16位地址
+    uint16_t address = 0;
+    for (int i = 0; i < 16; i++) {
+        if (parse_logic1(cur)) {
+            address |= 1 << i;
+        } else if (parse_logic0(cur)) {
+            address &= ~(1 << i);
+        } else {
+            ESP_LOGW(IR_TAG, "Failed to parse address bit %d", i);
+            return false;
+        }
+        cur++;
+    }
+    
+    // 剩余符号数量（排除前导码和地址）
+    size_t remaining_symbols = symbol_num - 17;
+    
+    // 计算数据字节数（每个字节需要8个符号）
+    size_t data_bytes = remaining_symbols / 8;
+    size_t discarded_symbols = remaining_symbols % 8;
+    
+    // 标准NEC协议是17+16+1=34个符号（前导码1 + 地址16 + 命令16 + 结束符1）
+    // 但实际有效数据只有16个符号（2字节），最后1个是结束符号
+    // 所以34个符号时，remaining_symbols=17，data_bytes=2，discarded_symbols=1是正常的
+    
+    // 如果有不是8的倍数的剩余符号，记录并舍弃（但34符号的标准NEC不警告）
+    if (discarded_symbols != 0 && symbol_num != 34) {
+        ESP_LOGW(IR_TAG, "Frame has %d extra symbols (not multiple of 8), discarding them", discarded_symbols);
+        ESP_LOGW(IR_TAG, "  Total symbols: %d, Using: %d (1 leading + 16 address + %d*8 data), Discarded: %d", 
+                 symbol_num, 17 + data_bytes * 8, data_bytes, discarded_symbols);
+    }
+    
+    // 如果没有有效的数据字节，返回失败
+    if (data_bytes == 0) {
+        ESP_LOGW(IR_TAG, "No valid data bytes to parse (remaining symbols: %d)", remaining_symbols);
+        return false;
+    }
+    
+    // 解析数据字节
+    uint8_t data[32]; // 最多支持32字节数据
+    if (data_bytes > 32) {
+        ESP_LOGW(IR_TAG, "Too many data bytes: %d (max 32)", data_bytes);
+        return false;
+    }
+    
+    for (size_t byte_idx = 0; byte_idx < data_bytes; byte_idx++) {
+        uint8_t byte_val = 0;
+        for (int bit = 0; bit < 8; bit++) {
+            if (parse_logic1(cur)) {
+                byte_val |= 1 << bit;
+            } else if (parse_logic0(cur)) {
+                byte_val &= ~(1 << bit);
+            } else {
+                ESP_LOGW(IR_TAG, "Failed to parse data byte %d bit %d", byte_idx, bit);
+                return false;
+            }
+            cur++;
+        }
+        data[byte_idx] = byte_val;
+    }
+    
+    // 保存地址
+    last_address = address;
+    
+    // 根据数据字节数判断是标准还是扩展协议
+    if (symbol_num == 34 && data_bytes == 2) {
+        // 标准NEC协议：34个符号 = 1前导码 + 16地址 + 16命令 + 1结束符
+        // 数据是2字节（16位命令）
+        uint16_t command = data[0] | (data[1] << 8);
+        last_command = command;
+        ESP_LOGI(IR_TAG, "Standard NEC: Address=0x%04X, Command=0x%04X", address, command);
+        
+        // 只调用一次回调
+        if (receive_callback) {
+            receive_callback(address, command, false);
+        }
+        return true;
+    }
+    
+    // 扩展NEC协议或非标准帧
+    // 构建数据字节的十六进制字符串
+    char hex_str[128] = {0};
+    int offset = 0;
+    for (size_t i = 0; i < data_bytes && offset < sizeof(hex_str) - 6; i++) {
+        offset += snprintf(hex_str + offset, sizeof(hex_str) - offset, "0x%02X ", data[i]);
+    }
+    
+    ESP_LOGI(IR_TAG, "Extended NEC: Address=0x%04X, Data bytes=%d -> %s", address, data_bytes, hex_str);
+    
+    // 对于扩展协议，将第一个字节作为命令返回
+    if (data_bytes > 0) {
+        last_command = data[0];
+        if (receive_callback) {
+            receive_callback(address, data[0], false);
+        }
+    }
+    
+    return true;
 }
 
 bool ir_nec_tools::check_in_range(uint32_t signal_duration, uint32_t spec_duration) {
