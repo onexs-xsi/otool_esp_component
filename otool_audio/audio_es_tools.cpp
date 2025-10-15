@@ -42,6 +42,8 @@ extern const uint8_t _binary_startup_1ch_pcm_end[];
 #endif
 
 static const char *TAG = "audio_es_tools";
+static constexpr size_t SILENCE_CHUNK_CAPACITY = 1024;
+static uint8_t g_silence_chunk[SILENCE_CHUNK_CAPACITY] = {0};
 
 // 确保输出文件的父目录存在，如果不存在则递归创建
 static esp_err_t ensure_parent_directories(const char* filepath)
@@ -171,6 +173,12 @@ audio_es_tools::audio_es_tools()
     i2c_bus_handle = NULL;
     i2s_user_count = 0;
     
+    // 创建互斥锁
+    audio_mutex = xSemaphoreCreateMutex();
+    if (!audio_mutex) {
+        ESP_LOGE(TAG, "Failed to create audio mutex!");
+    }
+    
     // 初始化状态标志
     es8311_initialized = false;
     es7210_initialized = false;
@@ -251,6 +259,12 @@ audio_es_tools::~audio_es_tools()
     ESP_LOGI(TAG, "audio_es_tools object destroyed");
     // 清理音频资源
     audio_system_deinit();
+    
+    // 销毁互斥锁
+    if (audio_mutex) {
+        vSemaphoreDelete(audio_mutex);
+        audio_mutex = nullptr;
+    }
 }
 
 // 内部辅助：确保 I2S 通道存在
@@ -619,8 +633,15 @@ esp_err_t audio_es_tools::audio_system_init(i2c_master_bus_handle_t i2c_bus_hand
 
 esp_err_t audio_es_tools::audio_system_deinit()
 {
+    // 获取互斥锁保护
+    if (audio_mutex && xSemaphoreTake(audio_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to acquire audio mutex for deinit, force deinit anyway");
+        // 继续执行，但可能有风险
+    }
+    
     if (!system_initialized) {
         ESP_LOGW(TAG, "Audio system not initialized");
+        if (audio_mutex) xSemaphoreGive(audio_mutex);
         return ESP_OK;
     }
 
@@ -638,6 +659,9 @@ esp_err_t audio_es_tools::audio_system_deinit()
     system_initialized = false;
     
     ESP_LOGI(TAG, "Audio system deinitialized successfully");
+    
+    // 释放互斥锁
+    if (audio_mutex) xSemaphoreGive(audio_mutex);
     return ESP_OK;
 }
 
@@ -1154,7 +1178,7 @@ bool audio_es_tools::is_audio_file_available(audio_file_type_t audio_type) const
     }
 }
 
-esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type)
+esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type, bool check_stop_signal)
 {
     // 边界检查
     if (audio_type < 0 || audio_type >= AUDIO_FILE_MAX) {
@@ -1257,27 +1281,56 @@ esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type)
 
     ESP_LOGI(TAG, "PCM data size: %zu bytes", pcm_len);
 
-    // 播放PCM数据
-    esp_err_t ret = esp_codec_dev_write(play_dev, (uint8_t*)pcm_start, pcm_len);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to play audio: %s", esp_err_to_name(ret));
+    // 分块播放PCM数据，支持中途停止
+    const size_t CHUNK_SIZE = 4096;  // 每次写4KB数据
+    size_t bytes_written = 0;
+    esp_err_t ret = ESP_OK;
+    
+    while (bytes_written < pcm_len) {
+        // 检查停止信号（仅在异步模式下）
+        if (check_stop_signal) {
+            uint32_t notification_value = 0;
+            if (xTaskNotifyWait(0, 0, &notification_value, 0) == pdTRUE) {
+                ESP_LOGI(TAG, "Received stop signal during playback, stopping gracefully...");
+                ret = ESP_ERR_INVALID_STATE;  // 使用特殊错误码表示被中断
+                break;
+            }
+        }
+        
+        size_t remaining = pcm_len - bytes_written;
+        size_t to_write = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
+        
+        ret = esp_codec_dev_write(play_dev, (uint8_t*)(pcm_start + bytes_written), to_write);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to write audio chunk at offset %zu: %s", bytes_written, esp_err_to_name(ret));
+            return ret;
+        }
+        
+        bytes_written += to_write;
+    }
+    
+    if (ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGI(TAG, "Playback interrupted by stop signal at %zu/%zu bytes", bytes_written, pcm_len);
         return ret;
     }
 
-    // 播放完成后，适度清理音频管道，避免残留声音
-    esp_err_t clear_ret = clear_audio_pipeline(80);
-    if (clear_ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to clear audio pipeline: %s", esp_err_to_name(clear_ret));
+    ESP_LOGI(TAG, "Audio playback completed successfully (%zu bytes)", bytes_written);
+    
+    // 仅在完整播放完成时清理管道
+    if (bytes_written == pcm_len) {
+        esp_err_t clear_ret = clear_audio_pipeline(80);
+        if (clear_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to clear audio pipeline: %s", esp_err_to_name(clear_ret));
+        }
     }
 
-    ESP_LOGI(TAG, "Audio playbook completed successfully");
     return ESP_OK;
 }
 
 esp_err_t audio_es_tools::play_audio_file(audio_file_type_t audio_type, audio_playback_mode_t mode)
 {
     if (mode == AUDIO_PLAYBACK_BLOCKING) {
-        return play_audio_file_impl(audio_type);
+        return play_audio_file_impl(audio_type, false);  // 阻塞模式不检查停止信号
     }
 
     if (playback_task_handle) {
@@ -1310,19 +1363,102 @@ void audio_es_tools::playback_task_entry(void* param)
     audio_file_type_t audio_type = args->audio_type;
     delete args;
 
-    esp_err_t result = instance->play_audio_file_impl(audio_type);
-    if (result != ESP_OK) {
+    ESP_LOGI(TAG, "Playback task started, ready to receive stop signals");
+    
+    // 异步模式：启用停止信号检查
+    esp_err_t result = instance->play_audio_file_impl(audio_type, true);
+    
+    if (result == ESP_ERR_INVALID_STATE) {
+        // 被停止信号中断
+        ESP_LOGI(TAG, "Playback interrupted by stop request, performing cleanup...");
+        
+        // 快速静音
+        float original_volume = instance->volume;
+        instance->set_volume(0.0);
+        vTaskDelay(pdMS_TO_TICKS(30));
+        
+        // 清理音频管道
+        esp_err_t clear_ret = instance->clear_audio_pipeline(200);
+        if (clear_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to clear pipeline after stop: %s", esp_err_to_name(clear_ret));
+        } else {
+            // 二次清理确保彻底
+            vTaskDelay(pdMS_TO_TICKS(30));
+            instance->clear_audio_pipeline(100);
+        }
+        
+        // 恢复音量
+        instance->set_volume(original_volume);
+        ESP_LOGI(TAG, "Playback stopped and cleanup completed");
+    } else if (result != ESP_OK) {
         ESP_LOGE(TAG, "Async playback failed for %s: %s", instance->get_audio_file_name(audio_type), esp_err_to_name(result));
+    } else {
+        ESP_LOGI(TAG, "Playback task completed normally");
     }
 
     instance->playback_task_handle = nullptr;
     vTaskDelete(nullptr);
 }
 
+esp_err_t audio_es_tools::stop_async_playback()
+{
+    TaskHandle_t task_to_stop = nullptr;
+
+    // 获取互斥锁保护
+    if (audio_mutex && xSemaphoreTake(audio_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to acquire audio mutex for stop");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (!playback_task_handle) {
+        ESP_LOGI(TAG, "No async playback task running");
+        if (audio_mutex) xSemaphoreGive(audio_mutex);
+        return ESP_OK;
+    }
+
+    task_to_stop = playback_task_handle;
+    ESP_LOGI(TAG, "Sending stop signal to playback task...");
+
+    BaseType_t notify_result = xTaskNotify(task_to_stop, 1, eSetValueWithOverwrite);
+    if (notify_result != pdPASS) {
+        ESP_LOGW(TAG, "Failed to send stop signal, notify result=%ld", (long)notify_result);
+        if (audio_mutex) xSemaphoreGive(audio_mutex);
+        return ESP_FAIL;
+    }
+
+    if (audio_mutex) xSemaphoreGive(audio_mutex);
+
+    ESP_LOGI(TAG, "Stop signal sent, waiting for task to finish...");
+    
+    // 等待任务自然结束（任务会清空 playback_task_handle）
+    const TickType_t max_wait = pdMS_TO_TICKS(3000);  // 最多等待3秒
+    TickType_t start_tick = xTaskGetTickCount();
+    
+    while (playback_task_handle != nullptr) {
+        if ((xTaskGetTickCount() - start_tick) > max_wait) {
+            ESP_LOGW(TAG, "Playback task did not exit gracefully within timeout");
+            // 超时后仍未退出，强制标记为nullptr（任务可能已卡死）
+            playback_task_handle = nullptr;
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    
+    ESP_LOGI(TAG, "Playback task exited gracefully");
+    return ESP_OK;
+}
+
 esp_err_t audio_es_tools::clear_audio_pipeline(uint32_t silence_duration_ms)
 {
+    // 获取互斥锁保护
+    if (audio_mutex && xSemaphoreTake(audio_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to acquire audio mutex for pipeline clear");
+        return ESP_ERR_TIMEOUT;
+    }
+
     if (!play_dev || !es8311_initialized) {
         ESP_LOGW(TAG, "Playback device not ready, skipping pipeline clear");
+        if (audio_mutex) xSemaphoreGive(audio_mutex);
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1335,25 +1471,39 @@ esp_err_t audio_es_tools::clear_audio_pipeline(uint32_t silence_duration_ms)
     uint32_t bytes_per_sample = (bits_per_sample_val * channels) / 8;
     size_t silence_size = (sample_rate_hz * bytes_per_sample * silence_duration_ms) / 1000;
 
-    // 分配并填充静音数据
-    uint8_t *silence_data = (uint8_t *)calloc(silence_size, 1); // calloc自动填充为0
-    if (!silence_data) {
-        ESP_LOGE(TAG, "Failed to allocate %zu bytes for silence buffer", silence_size);
-        return ESP_ERR_NO_MEM;
+    if (silence_size == 0) {
+        if (audio_mutex) xSemaphoreGive(audio_mutex);
+        ESP_LOGW(TAG, "Silence size calculated as 0, skipping pipeline clear");
+        return ESP_OK;
     }
 
-    // 发送静音数据
-    esp_err_t ret = esp_codec_dev_write(play_dev, silence_data, silence_size);
+    size_t chunk_capacity = SILENCE_CHUNK_CAPACITY - (SILENCE_CHUNK_CAPACITY % bytes_per_sample);
+    if (chunk_capacity == 0) {
+        chunk_capacity = bytes_per_sample;
+    }
+
+    esp_codec_dev_handle_t local_play_dev = play_dev;
+    size_t remaining = silence_size;
+    esp_err_t ret = ESP_OK;
+
+    while (remaining > 0) {
+        size_t send_size = remaining < chunk_capacity ? remaining : chunk_capacity;
+        ret = esp_codec_dev_write(local_play_dev, g_silence_chunk, send_size);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to write silence chunk (%zu bytes): %s", send_size, esp_err_to_name(ret));
+            break;
+        }
+        remaining -= send_size;
+    }
+
+    if (audio_mutex) xSemaphoreGive(audio_mutex);
+
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to write silence data: %s", esp_err_to_name(ret));
-        free(silence_data);
         return ret;
     }
 
     // 等待静音播放完成
-    vTaskDelay(pdMS_TO_TICKS(silence_duration_ms + 50)); // 额外50ms确保完成
-
-    free(silence_data);
+    vTaskDelay(pdMS_TO_TICKS(silence_duration_ms + 50));
     ESP_LOGI(TAG, "Audio pipeline cleared successfully");
     return ESP_OK;
 }

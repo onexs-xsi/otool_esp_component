@@ -18,6 +18,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include "i2c_bus.h"
 
@@ -175,6 +176,7 @@ private:
     bool pins_high_z_on_sleep = false;      ///< 进入睡眠时是否将 I2S 与 PA 引脚置为高阻
     bool suppress_release = false;          ///< 在系统整体去初始化期间暂缓 I2S 释放
     TaskHandle_t playback_task_handle = nullptr;   ///< 异步播放任务句柄
+    SemaphoreHandle_t audio_mutex = nullptr;       ///< 音频操作互斥锁
     
     // I2S 通道配置参数
     i2s_port_t i2s_port_num = I2S_NUM_0;                        ///< I2S通道编号
@@ -199,7 +201,7 @@ private:
     void try_release_i2s();                 ///< 在引用计数为 0 时释放 I2S 通道
     void incr_i2s_user();                   ///< 增加 I2S 使用者计数
     void decr_i2s_user();                   ///< 减少 I2S 使用者计数
-    esp_err_t play_audio_file_impl(audio_file_type_t audio_type); ///< 内部播放实现
+    esp_err_t play_audio_file_impl(audio_file_type_t audio_type, bool check_stop_signal); ///< 内部播放实现
     static void playback_task_entry(void* param);                ///< 异步播放任务入口
 
 public:
@@ -408,6 +410,16 @@ public:
     * @return bool 返回异步播放任务是否正在运行
     */
     bool is_async_playback_running() const { return playback_task_handle != nullptr; }
+
+    /**
+     * @brief 停止正在运行的异步播放任务
+     * 
+     * 强制停止当前正在运行的异步播放任务并清理音频管道
+     * @return esp_err_t 返回操作结果
+     *         - ESP_OK: 停止成功或没有运行的任务
+     *         - ESP_ERR_TIMEOUT: 任务停止超时
+     */
+    esp_err_t stop_async_playback();
 
     /**
      * @brief 清理音频播放管道，发送静音数据清除残留音频

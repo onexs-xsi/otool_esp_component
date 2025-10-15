@@ -3,7 +3,7 @@
 
 # 定义PCM文件控制选项
 option(ENABLE_PCM_TEST_A "Enable embedding test_a.pcm file" OFF)
-option(ENABLE_PCM_TEST_B "Enable embedding test_b.pcm file" OFF)
+option(ENABLE_PCM_TEST_B "Enable embedding test_b.pcm file" ON)
 option(ENABLE_PCM_STARTUP_1CH "Enable embedding startup_1ch.pcm file" ON)
 option(ENABLE_PCM_SINE_440HZ "Enable embedding sine_440Hz_30s_44100Hz_16bit_1ch.pcm file" OFF)
 
