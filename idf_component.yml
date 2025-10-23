@@ -7,3 +7,5 @@ dependencies:
   idf:
     version: ">=5.0.0"
   espressif/esp_codec_dev: "^1.4.0"
+  espressif/esp-sr: ^2.2.0
+  espressif/esp-dsp: ^1.6.0

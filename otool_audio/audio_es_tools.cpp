@@ -7,43 +7,383 @@
 #include "audio_es_tools.h"
 #include "audio_config.h"
 #include "driver/i2s_std.h"
+#if SOC_I2S_SUPPORTS_TDM
+#include "driver/i2s_tdm.h"
+#endif
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
+#include "esp_heap_caps.h"
+#include "audio_remix_tools.h"
 #include "freertos/task.h"
+#include "es7210_adc.h"
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 #include <string>
-#include <new>
 #include <sys/stat.h>
+#include <math.h>
 
-#ifdef USE_PCM_TEST_A
-// test_a.pcm 可用时的处理逻辑
-extern const uint8_t _binary_test_a_pcm_start[];
-extern const uint8_t _binary_test_a_pcm_end[];
+#ifdef USE_PCM_CANDY_WIND_1CH_16K_16B_9S
+// candy_wind_pcm_1ch_16k_16bit_9s.pcm 可用时的处理逻辑
+extern const uint8_t _binary_candy_wind_pcm_1ch_16k_16bit_9s_pcm_start[];
+extern const uint8_t _binary_candy_wind_pcm_1ch_16k_16bit_9s_pcm_end[];
 #endif
 
-#ifdef USE_PCM_TEST_B  
-// test_b.pcm 可用时的处理逻辑
-extern const uint8_t _binary_test_b_pcm_start[];
-extern const uint8_t _binary_test_b_pcm_end[];
+#ifdef USE_PCM_CANDY_WIND_1CH_44K_16B_45S
+// candy_wind_pcm_1ch_44.1k_16bit_45.5s.pcm 可用时的处理逻辑
+extern const uint8_t _binary_candy_wind_pcm_1ch_44_1k_16bit_45_5s_pcm_start[];
+extern const uint8_t _binary_candy_wind_pcm_1ch_44_1k_16bit_45_5s_pcm_end[];
 #endif
 
-#ifdef USE_PCM_SINE_440HZ
-// sine_440Hz_30s_44100Hz_16bit_1ch.pcm 可用时的处理逻辑
-extern const uint8_t _binary_sine_440Hz_30s_44100Hz_16bit_1ch_pcm_start[];
-extern const uint8_t _binary_sine_440Hz_30s_44100Hz_16bit_1ch_pcm_end[];
+#ifdef USE_PCM_CANDY_WIND_2CH_16K_16B_9S
+// candy_wind_pcm_2ch_16k_16bit_9s.pcm 可用时的处理逻辑
+extern const uint8_t _binary_candy_wind_pcm_2ch_16k_16bit_9s_pcm_start[];
+extern const uint8_t _binary_candy_wind_pcm_2ch_16k_16bit_9s_pcm_end[];
 #endif
 
-#ifdef USE_PCM_STARTUP_1CH
-// startup_1ch.pcm 可用时的处理逻辑
-extern const uint8_t _binary_startup_1ch_pcm_start[];
-extern const uint8_t _binary_startup_1ch_pcm_end[];
+#ifdef USE_PCM_CANDY_WIND_2CH_44K_16B_45S
+// candy_wind_pcm_2ch_44.1k_16bit_45.5s.pcm 可用时的处理逻辑
+extern const uint8_t _binary_candy_wind_pcm_2ch_44_1k_16bit_45_5s_pcm_start[];
+extern const uint8_t _binary_candy_wind_pcm_2ch_44_1k_16bit_45_5s_pcm_end[];
+#endif
+
+#ifdef USE_PCM_SINE_440HZ_2CH_16K_16B_10S
+// sine_440Hz_pcm_2ch_16k_16bit_10s.pcm 可用时的处理逻辑
+extern const uint8_t _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_start[];
+extern const uint8_t _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_end[];
+#endif
+
+#ifdef USE_PCM_STARTUP_1CH_16K_16B_4S
+// startup_pcm_1ch_16k_16bit_4s.pcm 可用时的处理逻辑
+extern const uint8_t _binary_startup_pcm_1ch_16k_16bit_4s_pcm_start[];
+extern const uint8_t _binary_startup_pcm_1ch_16k_16bit_4s_pcm_end[];
+#endif
+
+#ifdef USE_PCM_STARTUP_2CH_16K_16B_4S
+// startup_pcm_2ch_16k_16bit_4s.pcm 可用时的处理逻辑
+extern const uint8_t _binary_startup_pcm_2ch_16k_16bit_4s_pcm_start[];
+extern const uint8_t _binary_startup_pcm_2ch_16k_16bit_4s_pcm_end[];
 #endif
 
 static const char *TAG = "audio_es_tools";
 static constexpr size_t SILENCE_CHUNK_CAPACITY = 1024;
 static uint8_t g_silence_chunk[SILENCE_CHUNK_CAPACITY] = {0};
+
+namespace {
+
+static inline int16_t load_int16_le(const uint8_t* ptr)
+{
+    int16_t value = 0;
+    memcpy(&value, ptr, sizeof(int16_t));
+    return value;
+}
+
+static inline uint32_t load_uint32_le(const uint8_t* ptr)
+{
+    uint32_t value = 0;
+    memcpy(&value, ptr, sizeof(uint32_t));
+    return value;
+}
+
+} // namespace
+
+void audio_es_tools::free_channel_split_result(channel_split_result_t& result)
+{
+    for (int i = 0; i < 4; ++i) {
+        if (result.mic_buffers[i]) {
+            free(result.mic_buffers[i]);
+            result.mic_buffers[i] = nullptr;
+        }
+    }
+
+    result.samples_per_channel = 0;
+    result.bytes_per_sample = 0;
+    result.status = ESP_OK;
+}
+
+channel_split_result_t audio_es_tools::split_recorded_channels(const uint8_t* record_buffer,
+                                                              size_t bytes_read,
+                                                              const esp_codec_dev_sample_info_t& fs,
+                                                              bool is_tdm_mode,
+                                                              audio_mic_channel_t mic_channels)
+{
+    channel_split_result_t result{};
+    result.status = ESP_FAIL;
+    result.enabled_mask = mic_channels;
+    result.is_tdm_mode = is_tdm_mode;
+    result.bytes_per_sample = (fs.bits_per_sample >> 3);
+
+    if (!record_buffer || bytes_read == 0) {
+        result.status = ESP_ERR_INVALID_ARG;
+        return result;
+    }
+
+    if (result.bytes_per_sample == 0) {
+        ESP_LOGE(TAG, "Invalid bits_per_sample: %u", fs.bits_per_sample);
+        result.status = ESP_ERR_INVALID_ARG;
+        return result;
+    }
+
+    uint8_t enabled_indices[4] = {0};
+    uint8_t mic_count = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (mic_channels & (1 << i)) {
+            enabled_indices[mic_count++] = static_cast<uint8_t>(i);
+        }
+    }
+
+    if (mic_count == 0) {
+        ESP_LOGE(TAG, "No microphone channels enabled for splitting (mask=0x%02X)", mic_channels);
+        result.status = ESP_ERR_INVALID_ARG;
+        return result;
+    }
+
+    size_t samples_per_channel = 0;
+
+    if (is_tdm_mode) {
+        const size_t stereo_frame_bytes = result.bytes_per_sample * 2;
+        if (result.bytes_per_sample != sizeof(uint32_t)) {
+            ESP_LOGW(TAG, "Unexpected slot width %zu bytes in TDM mode; assuming 32-bit packing",
+                     result.bytes_per_sample);
+        }
+        if (stereo_frame_bytes == 0) {
+            ESP_LOGE(TAG, "Invalid TDM frame size calculation (slot bytes=%zu)", result.bytes_per_sample);
+            result.status = ESP_ERR_INVALID_STATE;
+            return result;
+        }
+        if (bytes_read % stereo_frame_bytes != 0) {
+            ESP_LOGW(TAG, "Recorded byte count (%zu) not aligned with TDM frame size (%zu); trailing data ignored",
+                     bytes_read, stereo_frame_bytes);
+        }
+        samples_per_channel = bytes_read / stereo_frame_bytes;
+    } else {
+        size_t channel_count = fs.channel ? static_cast<size_t>(fs.channel) : 1;
+        const size_t frame_bytes = result.bytes_per_sample * channel_count;
+        if (frame_bytes == 0) {
+            ESP_LOGE(TAG, "Invalid STD frame size calculation (slot bytes=%zu, channels=%u)",
+                     result.bytes_per_sample, fs.channel);
+            result.status = ESP_ERR_INVALID_STATE;
+            return result;
+        }
+        samples_per_channel = bytes_read / frame_bytes;
+    }
+
+    if (samples_per_channel == 0) {
+        ESP_LOGE(TAG, "Channel splitting failed: no samples detected (bytes=%zu)", bytes_read);
+        result.status = ESP_ERR_INVALID_SIZE;
+        return result;
+    }
+
+    result.samples_per_channel = samples_per_channel;
+
+    for (int i = 0; i < 4; ++i) {
+        if (mic_channels & (1 << i)) {
+            result.mic_buffers[i] = static_cast<int16_t*>(malloc(samples_per_channel * sizeof(int16_t)));
+            if (!result.mic_buffers[i]) {
+                ESP_LOGE(TAG, "Failed to allocate channel buffer for MIC%u (%zu samples)",
+                         i + 1, samples_per_channel);
+                for (int j = 0; j < 4; ++j) {
+                    if (result.mic_buffers[j]) {
+                        free(result.mic_buffers[j]);
+                        result.mic_buffers[j] = nullptr;
+                    }
+                }
+                result.status = ESP_ERR_NO_MEM;
+                return result;
+            }
+            memset(result.mic_buffers[i], 0, samples_per_channel * sizeof(int16_t));
+        }
+    }
+
+    if (is_tdm_mode) {
+        const size_t stereo_frame_bytes = result.bytes_per_sample * 2;
+        const size_t total_frames = bytes_read / stereo_frame_bytes;
+
+        if (result.bytes_per_sample != sizeof(uint32_t)) {
+            ESP_LOGW(TAG, "TDM splitting operating without 32-bit slot width validation (slot=%zu)",
+                     result.bytes_per_sample * 8);
+        }
+
+        for (size_t frame = 0; frame < total_frames; ++frame) {
+            size_t base = frame * stereo_frame_bytes;
+            int16_t left_high = 0;
+            int16_t left_low = 0;
+            int16_t right_high = 0;
+            int16_t right_low = 0;
+
+            if (result.bytes_per_sample == sizeof(uint32_t)) {
+                uint32_t left_word = load_uint32_le(record_buffer + base);
+                uint32_t right_word = load_uint32_le(record_buffer + base + result.bytes_per_sample);
+                left_high = static_cast<int16_t>(left_word >> 16);
+                left_low = static_cast<int16_t>(left_word & 0xFFFF);
+                right_high = static_cast<int16_t>(right_word >> 16);
+                right_low = static_cast<int16_t>(right_word & 0xFFFF);
+            } else {
+                int16_t left_sample = load_int16_le(record_buffer + base);
+                int16_t right_sample = load_int16_le(record_buffer + base + result.bytes_per_sample);
+                left_high = left_sample;
+                left_low = left_sample;
+                right_high = right_sample;
+                right_low = right_sample;
+            }
+
+            if (result.mic_buffers[0]) {
+                result.mic_buffers[0][frame] = left_high;
+            }
+            if (result.mic_buffers[2]) {
+                result.mic_buffers[2][frame] = left_low;
+            }
+            if (result.mic_buffers[1]) {
+                result.mic_buffers[1][frame] = right_high;
+            }
+            if (result.mic_buffers[3]) {
+                result.mic_buffers[3][frame] = right_low;
+            }
+        }
+    } else {
+        const size_t channel_count = fs.channel ? static_cast<size_t>(fs.channel) : 1;
+        const size_t frame_bytes = result.bytes_per_sample * channel_count;
+
+        if (channel_count > 2) {
+            ESP_LOGW(TAG, "STD mode detected with %u channels; using first two for MIC mapping", fs.channel);
+        }
+
+        if (channel_count == 1 && mic_count > 1) {
+            ESP_LOGW(TAG, "Multiple microphones enabled with mono STD stream; duplicating mono data across channels");
+        }
+
+        if (mic_count == 1) {
+            const uint8_t mic_index = enabled_indices[0];
+            const bool is_left_channel = (mic_index == 0 || mic_index == 2);
+            const uint8_t channel_offset = is_left_channel ? 0 : 1;
+
+            if (channel_count == 1) {
+                for (size_t i = 0; i < samples_per_channel; ++i) {
+                    int16_t sample = load_int16_le(record_buffer + i * result.bytes_per_sample);
+                    if (result.mic_buffers[mic_index]) {
+                        result.mic_buffers[mic_index][i] = sample;
+                    }
+                }
+            } else {
+                for (size_t i = 0; i < samples_per_channel; ++i) {
+                    size_t sample_pos = (i * channel_count + channel_offset) * result.bytes_per_sample;
+                    int16_t sample = load_int16_le(record_buffer + sample_pos);
+                    if (result.mic_buffers[mic_index]) {
+                        result.mic_buffers[mic_index][i] = sample;
+                    }
+                }
+            }
+        } else if (mic_count == 2) {
+            const uint8_t first_mic = enabled_indices[0];
+            const uint8_t second_mic = enabled_indices[1];
+
+            for (size_t i = 0; i < samples_per_channel; ++i) {
+                size_t base = i * frame_bytes;
+                int16_t left_sample = load_int16_le(record_buffer + base);
+                int16_t right_sample = (channel_count >= 2)
+                                           ? load_int16_le(record_buffer + base + result.bytes_per_sample)
+                                           : left_sample;
+
+                if (result.mic_buffers[first_mic]) {
+                    result.mic_buffers[first_mic][i] = left_sample;
+                }
+                if (result.mic_buffers[second_mic]) {
+                    result.mic_buffers[second_mic][i] = right_sample;
+                }
+            }
+        } else {
+            if (mic_count == 3) {
+                ESP_LOGW(TAG, "STD mode with 3 microphones enabled; one slot may carry zero samples");
+            } else {
+                ESP_LOGW(TAG, "STD mode with 4 microphones enabled; consider using TDM for optimal layout");
+            }
+
+            for (size_t i = 0; i < samples_per_channel; ++i) {
+                size_t base = i * frame_bytes;
+                int16_t left_sample = load_int16_le(record_buffer + base);
+                int16_t right_sample = (channel_count >= 2)
+                                           ? load_int16_le(record_buffer + base + result.bytes_per_sample)
+                                           : left_sample;
+
+                if (result.mic_buffers[0]) {
+                    result.mic_buffers[0][i] = left_sample;
+                }
+                if (result.mic_buffers[1]) {
+                    result.mic_buffers[1][i] = right_sample;
+                }
+                if (result.mic_buffers[2]) {
+                    result.mic_buffers[2][i] = left_sample;
+                }
+                if (result.mic_buffers[3]) {
+                    result.mic_buffers[3][i] = right_sample;
+                }
+            }
+        }
+    }
+
+    result.status = ESP_OK;
+    return result;
+}
+
+void audio_es_tools::compute_split_channel_quality(const channel_split_result_t& split_result,
+                                                   mic_channel_quality_t quality[4])
+{
+    const size_t samples = split_result.samples_per_channel;
+
+    for (int i = 0; i < 4; ++i) {
+        mic_channel_quality_t& out = quality[i];
+        out.available = (split_result.mic_buffers[i] != nullptr);
+        out.sample_count = out.available ? samples : 0;
+        out.min_value = out.available ? INT16_MAX : 0;
+        out.max_value = out.available ? INT16_MIN : 0;
+        out.average_abs_amplitude = 0;
+        out.rms_db = -96.0;
+        out.zero_percent = 0.0;
+        out.clipped_percent = 0.0;
+
+        if (!out.available || samples == 0) {
+            if (out.available) {
+                out.min_value = 0;
+                out.max_value = 0;
+            }
+            continue;
+        }
+
+        const int16_t* data = split_result.mic_buffers[i];
+        int64_t sum_abs = 0;
+        size_t zero_count = 0;
+        size_t clipped_count = 0;
+        long double sum_square = 0.0;
+
+        for (size_t sample_index = 0; sample_index < samples; ++sample_index) {
+            int16_t sample = data[sample_index];
+            if (sample == 0) {
+                zero_count++;
+            }
+            if (sample == INT16_MAX || sample == INT16_MIN) {
+                clipped_count++;
+            }
+            sum_abs += llabs(static_cast<long long>(sample));
+            if (sample < out.min_value) {
+                out.min_value = sample;
+            }
+            if (sample > out.max_value) {
+                out.max_value = sample;
+            }
+            long double v = static_cast<long double>(sample);
+            sum_square += v * v;
+        }
+
+        out.average_abs_amplitude = static_cast<int32_t>(sum_abs / static_cast<int64_t>(samples));
+        const long double mean_square = sum_square / static_cast<long double>(samples);
+        const double mean_square_double = static_cast<double>(mean_square);
+        const double rms_linear = (mean_square_double > 0.0) ? sqrt(mean_square_double) : 0.0;
+        out.rms_db = (rms_linear > 0.0) ? (20.0 * log10(rms_linear / 32768.0)) : -96.0;
+        out.zero_percent = (samples > 0) ? (static_cast<double>(zero_count) * 100.0 / static_cast<double>(samples)) : 0.0;
+        out.clipped_percent = (samples > 0) ? (static_cast<double>(clipped_count) * 100.0 / static_cast<double>(samples)) : 0.0;
+    }
+}
 
 // 确保输出文件的父目录存在，如果不存在则递归创建
 static esp_err_t ensure_parent_directories(const char* filepath)
@@ -310,9 +650,8 @@ esp_err_t audio_es_tools::i2s_channel_init()
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Initializing I2S channels (TX and RX) with port %d, %s, %d Hz, %d bits...", 
+    ESP_LOGI(TAG, "Initializing I2S channels (TX and RX) with port %d, %d Hz, %d bits...", 
              i2s_port_num, 
-             (audio_channels == AUDIO_CHANNELS_MONO) ? "MONO" : "STEREO",
              (int)sample_rate, 
              (int)bits_per_sample);
     
@@ -327,7 +666,7 @@ esp_err_t audio_es_tools::i2s_channel_init()
         return ret;
     }
     
-    ESP_LOGI(TAG, "I2S channels created successfully");
+    ESP_LOGI(TAG, "I2S channels created successfully (channel config will be set individually)");
     return ESP_OK;
 }
 
@@ -393,38 +732,20 @@ esp_err_t audio_es_tools::i2s_tx_init()
     }
 
     ESP_LOGI(TAG, "Configuring I2S TX channel with %s, %d Hz, %d bits...", 
-             (audio_channels == AUDIO_CHANNELS_MONO) ? "MONO" : "STEREO",
+             (tx_channels == AUDIO_CHANNELS_MONO) ? "MONO" : "STEREO",
              (int)sample_rate, 
              (int)bits_per_sample);
     
     esp_err_t ret = ESP_OK;
     
     // 根据声道数量设置slot模式
-    i2s_slot_mode_t slot_mode = (audio_channels == AUDIO_CHANNELS_MONO) ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO;
+    i2s_slot_mode_t slot_mode = (tx_channels == AUDIO_CHANNELS_MONO) ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO;
     
-    // 根据位深度设置数据位宽
-    i2s_data_bit_width_t data_bit_width;
-    switch (bits_per_sample) {
-        case AUDIO_BITS_16:
-            data_bit_width = I2S_DATA_BIT_WIDTH_16BIT;
-            break;
-        case AUDIO_BITS_24:
-            data_bit_width = I2S_DATA_BIT_WIDTH_24BIT;
-            break;
-        case AUDIO_BITS_32:
-            data_bit_width = I2S_DATA_BIT_WIDTH_32BIT;
-            break;
-        default:
-            data_bit_width = I2S_DATA_BIT_WIDTH_16BIT;
-            break;
-    }
-    
-    // 配置 I2S TX 标准模式
     gpio_num_t tx_dout_pin = i2s_cross_data_pins ? i2s_data_in_pin : i2s_data_out_pin;
     gpio_num_t tx_din_pin  = i2s_cross_data_pins ? i2s_data_out_pin : I2S_GPIO_UNUSED;
     i2s_std_config_t tx_std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG((uint32_t)sample_rate),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(data_bit_width, slot_mode),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(bits_per_sample, slot_mode),
         .gpio_cfg = {
             .mclk = i2s_mck_pin,
             .bclk = i2s_bck_pin,
@@ -488,41 +809,35 @@ esp_err_t audio_es_tools::i2s_rx_init()
         ESP_LOGE(TAG, "I2S RX handle not available, call i2s_channel_init() first");
         return ESP_ERR_INVALID_STATE;
     }
-
-    ESP_LOGI(TAG, "Configuring I2S RX channel with %s, %d Hz, %d bits...", 
-             (audio_channels == AUDIO_CHANNELS_MONO) ? "MONO" : "STEREO",
-             (int)sample_rate, 
-             (int)bits_per_sample);
-    
-    esp_err_t ret = ESP_OK;
-    
-    // 根据声道数量设置slot模式
-    i2s_slot_mode_t slot_mode = (audio_channels == AUDIO_CHANNELS_MONO) ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO;
-    
-    // 根据位深度设置数据位宽
-    i2s_data_bit_width_t data_bit_width;
-    switch (bits_per_sample) {
-        case AUDIO_BITS_16:
-            data_bit_width = I2S_DATA_BIT_WIDTH_16BIT;
-            break;
-        case AUDIO_BITS_24:
-            data_bit_width = I2S_DATA_BIT_WIDTH_24BIT;
-            break;
-        case AUDIO_BITS_32:
-            data_bit_width = I2S_DATA_BIT_WIDTH_32BIT;
-            break;
-        default:
-            data_bit_width = I2S_DATA_BIT_WIDTH_16BIT;
-            break;
+    uint8_t requested_channels = static_cast<uint8_t>(rx_channels);
+    if (requested_channels == 0) {
+        requested_channels = 1;
     }
-    
-    // 配置 I2S RX 标准模式
-    // cross 模式下：保持你原先“交叉”关系，使 RX 的 din 使用 data_out_pin；否则使用常规 data_in_pin。
+
+    const bool use_tdm = es7210_use_tdm;
+    if (use_tdm) {
+        ESP_LOGW(TAG, "es7210_use_tdm=TRUE but RX is forced to standard I2S configuration");
+    }
+
+    const char *mode_desc = (rx_channels == AUDIO_CHANNELS_MONO) ? "MONO" : "STEREO";
+
+    ESP_LOGI(TAG, "Configuring I2S RX channel with %s (%u %s), %d Hz, %d bits...",
+             mode_desc,
+             requested_channels,
+             (requested_channels > 1) ? "channels" : "channel",
+             (int)sample_rate,
+             (int)bits_per_sample);
+
     gpio_num_t rx_din_pin = i2s_cross_data_pins ? i2s_data_out_pin : i2s_data_in_pin;
     gpio_num_t rx_dout_pin = i2s_cross_data_pins ? i2s_data_in_pin : I2S_GPIO_UNUSED;
+
+    esp_err_t ret = ESP_OK;
+
+    // 标准 I2S 接收配置
+    i2s_slot_mode_t slot_mode = (rx_channels == AUDIO_CHANNELS_MONO) ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO;
     i2s_std_config_t rx_std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(data_bit_width, slot_mode),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(bits_per_sample, slot_mode),
         .gpio_cfg = {
             .mclk = i2s_mck_pin,
             .bclk = i2s_bck_pin,
@@ -536,20 +851,21 @@ esp_err_t audio_es_tools::i2s_rx_init()
             },
         },
     };
-    
+
     ret = i2s_channel_init_std_mode(rx_handle, &rx_std_cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize I2S RX standard mode: %s", esp_err_to_name(ret));
         return ret;
     }
-    
-    // 启用 I2S RX 通道
+
+    rx_tdm_slot_count = 0;
+
     ret = i2s_channel_enable(rx_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to enable I2S RX channel: %s", esp_err_to_name(ret));
         return ret;
     }
-    
+
     ESP_LOGI(TAG, "I2S RX channel configured successfully");
     rx_configured = true;
     return ESP_OK;
@@ -577,6 +893,8 @@ esp_err_t audio_es_tools::i2s_rx_deinit()
         rx_configured = false;
     }
     
+    rx_tdm_slot_count = 0;
+
     ESP_LOGI(TAG, "I2S RX channel disabled successfully");
     return ESP_OK;
 }
@@ -585,7 +903,7 @@ esp_err_t audio_es_tools::i2s_rx_deinit()
 // ES8311相关函数实现在 audio_es_es8311.cpp
 // ES7210相关函数实现在 audio_es_es7210.cpp
 
-esp_err_t audio_es_tools::audio_system_init(i2c_master_bus_handle_t i2c_bus_handle, i2s_port_t i2s_port_num, audio_channels_t channels, audio_sample_rate_t sample_rate, audio_bits_per_sample_t bits_per_sample)
+esp_err_t audio_es_tools::audio_system_init(i2c_master_bus_handle_t i2c_bus_handle, i2s_port_t i2s_port_num, audio_sample_rate_t sample_rate, i2s_data_bit_width_t bits_per_sample)
 {
     if (system_initialized) {
         ESP_LOGW(TAG, "Audio system already initialized");
@@ -598,18 +916,18 @@ esp_err_t audio_es_tools::audio_system_init(i2c_master_bus_handle_t i2c_bus_hand
         return ESP_ERR_INVALID_ARG;
     }
 
-    // 存储I2C总线句柄和I2S配置参数
+    // 存储I2C总线句柄和I2S配置参数（不包括声道配置）
     this->i2c_bus_handle = i2c_bus_handle;
     this->i2s_port_num = i2s_port_num;
-    this->audio_channels = channels;
     this->sample_rate = sample_rate;
     this->bits_per_sample = bits_per_sample;
 
-    ESP_LOGI(TAG, "Initializing audio system with I2C bus handle, I2S port %d, %s, %d Hz, %d bits...", 
+    ESP_LOGI(TAG, "Initializing audio system with I2C bus handle, I2S port %d, %d Hz, %d bits...", 
              i2s_port_num, 
-             (channels == AUDIO_CHANNELS_MONO) ? "MONO" : "STEREO",
              (int)sample_rate, 
              (int)bits_per_sample);
+    
+    ESP_LOGI(TAG, "Note: Channel configuration will be set individually by es8311_init() and es7210_init()");
     
     // 根据需要初始化相应的模块
     esp_err_t ret = ESP_OK;
@@ -621,11 +939,23 @@ esp_err_t audio_es_tools::audio_system_init(i2c_master_bus_handle_t i2c_bus_hand
         return ret;
     }
     
+    // 创建共享的 I2S 数据接口（避免重复创建导致冲突）
+    audio_codec_i2s_cfg_t i2s_cfg = {};
+    i2s_cfg.rx_handle = rx_handle;
+    i2s_cfg.tx_handle = tx_handle;
+    
+    shared_i2s_data_if = audio_codec_new_i2s_data(&i2s_cfg);
+    if (!shared_i2s_data_if) {
+        ESP_LOGE(TAG, "Failed to create shared I2S data interface");
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGI(TAG, "Shared I2S data interface created successfully");
+    
     system_initialized = true;
     
-    ESP_LOGI(TAG, "Audio system initialized successfully with I2S port %d, %s, %d Hz, %d bits", 
+    ESP_LOGI(TAG, "Audio system initialized successfully with I2S port %d, %d Hz, %d bits", 
              i2s_port_num,
-             (channels == AUDIO_CHANNELS_MONO) ? "MONO" : "STEREO",
              (int)sample_rate,
              (int)bits_per_sample);
     return ESP_OK;
@@ -651,6 +981,14 @@ esp_err_t audio_es_tools::audio_system_deinit()
     // 去初始化所有已初始化的模块（各自安全判断）
     if (es8311_initialized) es8311_deinit();
     if (es7210_initialized) es7210_deinit();
+    
+    // 释放共享的 I2S 数据接口
+    if (shared_i2s_data_if) {
+        audio_codec_delete_data_if(shared_i2s_data_if);
+        shared_i2s_data_if = nullptr;
+        ESP_LOGI(TAG, "Shared I2S data interface deleted");
+    }
+    
     // 现在统一处理 I2S 释放
     suppress_release = false;
     try_release_i2s();
@@ -662,49 +1000,6 @@ esp_err_t audio_es_tools::audio_system_deinit()
     
     // 释放互斥锁
     if (audio_mutex) xSemaphoreGive(audio_mutex);
-    return ESP_OK;
-}
-
-esp_err_t audio_es_tools::play_and_record_test()
-{
-    // 播放音乐测试可在系统已创建 I2S 且已初始化播放设备后运行
-    if (!play_dev || !es8311_initialized) {
-        ESP_LOGE(TAG, "Playback device not ready");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    ESP_LOGI(TAG, "Starting play and record test...");
-    
-    esp_err_t ret = ESP_OK;
-    
-    // 1. 测试播放功能
-    if (es8311_initialized && play_dev) {
-        ESP_LOGI(TAG, "Testing playback functionality...");
-        ret = play_music_test();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Playback test failed: %s", esp_err_to_name(ret));
-            return ret;
-        }
-        
-        // 播放和录音之间的间隔
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    } else {
-        ESP_LOGW(TAG, "ES8311 not initialized, skipping playback test");
-    }
-    
-    // 2. 测试录音功能
-    if (es7210_initialized && record_dev) {
-        ESP_LOGI(TAG, "Testing record functionality...");
-        ret = record_test(3000);  // 录音3秒
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Record test failed: %s", esp_err_to_name(ret));
-            return ret;
-        }
-    } else {
-        ESP_LOGW(TAG, "ES7210 not initialized, skipping record test");
-    }
-    
-    ESP_LOGI(TAG, "Play and record test completed successfully");
     return ESP_OK;
 }
 
@@ -729,32 +1024,6 @@ esp_err_t audio_es_tools::audio_system_sleep()
     }
     
     ESP_LOGI(TAG, "Audio system sleep mode enabled");
-    return ESP_OK;
-}
-
-esp_err_t audio_es_tools::play_music_test()
-{
-    if (!system_initialized) {
-        ESP_LOGE(TAG, "Audio system not initialized");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    ESP_LOGI(TAG, "Starting music test...");
-    
-    // 检查可用的PCM资源
-    ESP_LOGI(TAG, "Available PCM resources: %d", get_available_pcm_count());
-    ESP_LOGI(TAG, "PCM Test A available: %s", is_pcm_test_a_available() ? "YES" : "NO");
-    ESP_LOGI(TAG, "PCM Test B available: %s", is_pcm_test_b_available() ? "YES" : "NO");
-    ESP_LOGI(TAG, "PCM Sine 440Hz available: %s", is_pcm_sine_440hz_available() ? "YES" : "NO");
-    
-    // 使用自动模式播放第一个可用的音频文件
-    esp_err_t ret = play_audio_file(AUDIO_FILE_AUTO);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Music test failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    
-    ESP_LOGI(TAG, "Music test completed successfully");
     return ESP_OK;
 }
 
@@ -860,6 +1129,510 @@ esp_err_t audio_es_tools::record_test(uint32_t record_duration_ms)
     return ESP_OK;
 }
 
+esp_err_t audio_es_tools::record_and_play_test(uint32_t record_duration_seconds)
+{
+    if (!es7210_initialized || !es8311_initialized) {
+        ESP_LOGE(TAG, "Audio devices not initialized (ES7210 or ES8311)");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!record_dev || !play_dev) {
+        ESP_LOGE(TAG, "Record or playback device not available");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "=== Record and Play Test (Single Shot) ===");
+    ESP_LOGI(TAG, "Duration: %lu seconds", record_duration_seconds);
+    
+    // 获取当前音频格式信息（使用录音设备的声道配置）
+    esp_codec_dev_sample_info_t fs = {};
+    fs.sample_rate = (uint32_t)this->sample_rate;
+    fs.channel = (this->rx_channels == AUDIO_CHANNELS_MONO) ? 1 : 2;
+    fs.bits_per_sample = (uint32_t)this->bits_per_sample;
+    
+    ESP_LOGI(TAG, "Audio format: %lu Hz, %u channels, %u bits",
+             fs.sample_rate, fs.channel, fs.bits_per_sample);
+    
+    // 计算缓冲区大小
+    size_t bytes_per_sample = (fs.bits_per_sample >> 3);
+    size_t buffer_size = (size_t)fs.sample_rate * fs.channel * bytes_per_sample * record_duration_seconds;
+    
+    ESP_LOGI(TAG, "Allocating buffer: %zu bytes (%.2f KB)", buffer_size, buffer_size / 1024.0f);
+    
+    uint8_t *record_buffer = (uint8_t *)malloc(buffer_size);
+    if (!record_buffer) {
+        size_t free_heap = esp_get_free_heap_size();
+        ESP_LOGE(TAG, "Failed to allocate memory for recording");
+        ESP_LOGE(TAG, "Required: %zu bytes (%.2f KB), Free: %zu bytes (%.2f KB)",
+                buffer_size, buffer_size / 1024.0f, free_heap, free_heap / 1024.0f);
+        return ESP_ERR_NO_MEM;
+    }
+    
+    memset(record_buffer, 0, buffer_size);
+    
+    // ========== Phase 1: Recording ==========
+    ESP_LOGI(TAG, "Phase 1: Recording %lu seconds...", record_duration_seconds);
+    
+    const size_t BLOCK_SIZE = 512;
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(record_duration_seconds * 1000 + 500);
+    TickType_t start_time = xTaskGetTickCount();
+    size_t bytes_read = 0;
+    
+    while (bytes_read < buffer_size) {
+        size_t read_size = (buffer_size - bytes_read > BLOCK_SIZE) ? BLOCK_SIZE : (buffer_size - bytes_read);
+        
+        esp_err_t ret = esp_codec_dev_read(record_dev, record_buffer + bytes_read, (int)read_size);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Record read error at %zu bytes: %s", bytes_read, esp_err_to_name(ret));
+            free(record_buffer);
+            return ESP_FAIL;
+        }
+        
+        bytes_read += read_size;
+        
+        // 进度提示 (每25%打印一次)
+        static size_t last_progress = 0;
+        size_t progress = (bytes_read * 100) / buffer_size;
+        if (progress >= last_progress + 25) {
+            ESP_LOGI(TAG, "Recording progress: %zu%%", progress);
+            last_progress = progress;
+        }
+        
+        // 超时检查
+        if ((xTaskGetTickCount() - start_time) > timeout_ticks) {
+            ESP_LOGW(TAG, "Record timeout reached, stopping early");
+            break;
+        }
+    }
+    
+    TickType_t end_time = xTaskGetTickCount();
+    uint32_t actual_duration_ms = pdTICKS_TO_MS(end_time - start_time);
+    
+    ESP_LOGI(TAG, "Recording completed!");
+    ESP_LOGI(TAG, "Requested: %lu sec, Actual: %.2f sec",
+             record_duration_seconds, actual_duration_ms / 1000.0f);
+    ESP_LOGI(TAG, "Bytes read: %zu / %zu (%.1f%%)",
+             bytes_read, buffer_size, (buffer_size > 0) ? (bytes_read * 100.0f / buffer_size) : 0.0f);
+    
+    // 简单音频分析
+    if (bytes_read > 0) {
+        int16_t *samples = (int16_t *)record_buffer;
+        size_t sample_count = bytes_read / sizeof(int16_t);
+        
+        int32_t sum = 0;
+        int16_t min_val = INT16_MAX;
+        int16_t max_val = INT16_MIN;
+        
+        for (size_t i = 0; i < sample_count; i++) {
+            int16_t sample = samples[i];
+            sum += abs(sample);
+            if (sample < min_val) min_val = sample;
+            if (sample > max_val) max_val = sample;
+        }
+        
+        int32_t avg_amplitude = (sample_count > 0) ? (sum / (int32_t)sample_count) : 0;
+        
+        ESP_LOGI(TAG, "Audio analysis - Samples: %zu, Avg amplitude: %ld, Range: [%d, %d]",
+                 sample_count, avg_amplitude, min_val, max_val);
+        
+        if (avg_amplitude > 100) {
+            ESP_LOGI(TAG, "Valid audio signal detected [OK]");
+        } else {
+            ESP_LOGW(TAG, "Low audio signal - check microphone");
+        }
+    }
+    
+    // 录音和播放之间短暂延迟
+    vTaskDelay(pdMS_TO_TICKS(500));
+    
+    // ========== Phase 2: Playback ==========
+    ESP_LOGI(TAG, "Phase 2: Playing recorded audio...");
+    
+    start_time = xTaskGetTickCount();
+    
+    // 使用 play_audio_buffer 播放录音，支持自适应格式
+    esp_err_t ret = play_audio_buffer(
+        record_buffer,
+        bytes_read,
+        fs.sample_rate,
+        (fs.channel == 1) ? AUDIO_CHANNELS_MONO : AUDIO_CHANNELS_STEREO,
+        (i2s_data_bit_width_t)fs.bits_per_sample,
+        AUDIO_PLAYBACK_BLOCKING
+    );
+    
+    end_time = xTaskGetTickCount();
+    uint32_t playback_duration_ms = pdTICKS_TO_MS(end_time - start_time);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Playback failed: %s", esp_err_to_name(ret));
+        free(record_buffer);
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "Playback completed!");
+    ESP_LOGI(TAG, "Duration: %.2f sec, Bytes played: %zu", 
+             playback_duration_ms / 1000.0f, bytes_read);
+    
+    // ========== Phase 3: 生成详细统计报告 ==========
+    ESP_LOGI(TAG, "=== Analysis Results ===");
+    
+    if (bytes_read > 0 && fs.channel > 0) {
+        int16_t *samples = (int16_t *)record_buffer;
+        size_t total_samples = bytes_read / sizeof(int16_t);
+        size_t frames = total_samples / fs.channel;
+        
+        // 为每个通道统计信息
+        for (uint32_t ch = 0; ch < fs.channel; ch++) {
+            // 通道标识
+            const char* ch_name = (ch == 0) ? "Microphone" : "Loopback";
+            ESP_LOGI(TAG, "=== CH%u (%s) Statistics ===", ch + 1, ch_name);
+            
+            // 统计变量
+            int64_t sum_squares = 0;  // 用于计算RMS
+            int16_t min_val = INT16_MAX;
+            int16_t max_val = INT16_MIN;
+            size_t zero_count = 0;
+            size_t clipped_count = 0;
+            
+            // 遍历该通道的所有样本
+            for (size_t frame = 0; frame < frames; frame++) {
+                size_t idx = frame * fs.channel + ch;
+                if (idx >= total_samples) break;
+                
+                int16_t sample = samples[idx];
+                
+                // RMS 计算
+                int32_t sample_32 = (int32_t)sample;
+                sum_squares += (int64_t)(sample_32 * sample_32);
+                
+                // 峰值检测
+                if (sample < min_val) min_val = sample;
+                if (sample > max_val) max_val = sample;
+                
+                // 零样本计数 (绝对值小于等于 1)
+                if (sample >= -1 && sample <= 1) {
+                    zero_count++;
+                }
+                
+                // 削波检测 (接近最大值)
+                if (sample <= -32767 || sample >= 32767) {
+                    clipped_count++;
+                }
+            }
+            
+            // 计算 RMS Level (dB)
+            double rms_linear = 0.0;
+            if (frames > 0) {
+                double mean_square = (double)sum_squares / (double)frames;
+                rms_linear = sqrt(mean_square);
+            }
+            // 转换为 dB (参考值为 32768)
+            double rms_db = (rms_linear > 0) ? (20.0 * log10(rms_linear / 32768.0)) : -96.0;
+            
+            // 计算百分比
+            double zero_percent = (frames > 0) ? (zero_count * 100.0 / frames) : 0.0;
+            double clipped_percent = (frames > 0) ? (clipped_count * 100.0 / frames) : 0.0;
+            
+            // 打印统计结果 (格式类似图片)
+            ESP_LOGI(TAG, "  RMS Level: %.1f dB", rms_db);
+            ESP_LOGI(TAG, "  Peak: %d to %d", min_val, max_val);
+            ESP_LOGI(TAG, "  Zero samples: %zu (%.0f%%)", zero_count, zero_percent);
+            ESP_LOGI(TAG, "  Clipped samples: %zu (%.2f%%)", clipped_count, clipped_percent);
+        }
+    }
+    
+    ESP_LOGI(TAG, "=== Analysis Results ===");
+    
+    // 清理资源
+    free(record_buffer);
+    
+    // 清空播放管线，避免残留音频
+    esp_err_t clr_ret = clear_audio_pipeline(120);
+    if (clr_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to clear playback pipeline: %s", esp_err_to_name(clr_ret));
+    }
+    
+    ESP_LOGI(TAG, "=== Record and Play Test Completed ===");
+    return ESP_OK;
+}
+
+esp_err_t audio_es_tools::record_and_play_test_with_channel_select(uint32_t record_duration_seconds, audio_mic_channel_t target_mic_channel, bool analysis_only)
+{
+    // 仅分析模式只需要ES7210初始化
+    if (!es7210_initialized) {
+        ESP_LOGE(TAG, "ES7210 not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    // 正常播放模式需要两个设备都初始化
+    if (!analysis_only && !es8311_initialized) {
+        ESP_LOGE(TAG, "ES8311 not initialized (required for playback mode)");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!record_dev) {
+        ESP_LOGE(TAG, "Record device not available");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    if (!analysis_only && !play_dev) {
+        ESP_LOGE(TAG, "Playback device not available (required for playback mode)");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 验证目标麦克风通道是否为单一通道（不能是组合通道）
+    uint8_t target_mic_value = (uint8_t)target_mic_channel;
+    bool is_single_channel = (target_mic_value == 0x01 || target_mic_value == 0x02 || 
+                              target_mic_value == 0x04 || target_mic_value == 0x08);
+    
+    if (!is_single_channel) {
+        ESP_LOGE(TAG, "target_mic_channel must be a single microphone (AUDIO_MIC_CHANNEL_1/2/3/4), got: 0x%02X", 
+                 target_mic_value);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 将 audio_mic_channel_t 转换为索引 (0-3)
+    uint8_t target_channel = 0;
+    switch (target_mic_channel) {
+        case AUDIO_MIC_CHANNEL_1: target_channel = 0; break;
+        case AUDIO_MIC_CHANNEL_2: target_channel = 1; break;
+        case AUDIO_MIC_CHANNEL_3: target_channel = 2; break;
+        case AUDIO_MIC_CHANNEL_4: target_channel = 3; break;
+        default:
+            ESP_LOGE(TAG, "Invalid target_mic_channel: 0x%02X", target_mic_value);
+            return ESP_ERR_INVALID_ARG;
+    }
+
+    // 检查目标通道是否已启用
+    if (!(mic_channels & target_mic_value)) {
+        ESP_LOGE(TAG, "Target MIC%u (0x%02X) is not enabled in current config (0x%02X)", 
+                 target_channel + 1, target_mic_value, mic_channels);
+        ESP_LOGE(TAG, "Please initialize ES7210 with the target microphone enabled");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 计算启用的麦克风数量
+    uint8_t mic_count = 0;
+    for (int i = 0; i < 4; i++) {
+        if (mic_channels & (1 << i)) {
+            mic_count++;
+        }
+    }
+
+    // 直接参考ES7210的TDM状态
+    bool is_tdm_mode = es7210_use_tdm;
+    
+    ESP_LOGI(TAG, "=== Record and %s Test (Channel Select) ===", analysis_only ? "Analysis" : "Play");
+    ESP_LOGI(TAG, "Duration: %lu seconds, Target: MIC%u (0x%02X)", 
+             record_duration_seconds, target_channel + 1, target_mic_value);
+    ESP_LOGI(TAG, "Mode: %s (%u mics enabled: 0x%02X), Analysis only: %s", 
+             is_tdm_mode ? "TDM" : "Standard I2S", mic_count, mic_channels,
+             analysis_only ? "YES" : "NO");
+    
+    // 获取当前音频格式信息
+    esp_codec_dev_sample_info_t fs = {};
+    fs.sample_rate = (uint32_t)this->sample_rate;
+    fs.bits_per_sample = (uint32_t)this->bits_per_sample;
+    
+    // 确定I2S通道数配置
+    if (is_tdm_mode) {
+        fs.channel = rx_tdm_slot_count ? rx_tdm_slot_count : 4;  // TDM使用实际配置的slot数量（默认4）
+    } else {
+        fs.channel = (this->rx_channels == AUDIO_CHANNELS_MONO) ? 1 : 2;
+    }
+    
+    size_t bytes_per_sample = (fs.bits_per_sample >> 3);
+    
+    ESP_LOGI(TAG, "Audio format: %lu Hz, %u channels, %u bits per sample",
+             fs.sample_rate, fs.channel, fs.bits_per_sample);
+    
+    // 计算录音缓冲区大小
+    size_t buffer_size = (size_t)fs.sample_rate * fs.channel * bytes_per_sample * record_duration_seconds;
+    
+    if (is_tdm_mode) {
+        ESP_LOGI(TAG, "TDM buffer calculation:");
+        ESP_LOGI(TAG, "  - Total buffer: %zu bytes (%.2f KB)", buffer_size, buffer_size / 1024.0f);
+        ESP_LOGI(TAG, "  - TDM slots: %u", fs.channel);
+        ESP_LOGI(TAG, "  - Active mics: %u (0x%02X)", mic_count, mic_channels);
+        ESP_LOGI(TAG, "  - Data rate: %.2f KB/s", 
+                 (float)(fs.sample_rate * fs.channel * bytes_per_sample) / 1024.0f);
+    } else {
+        ESP_LOGI(TAG, "Standard I2S buffer: %zu bytes (%.2f KB)", buffer_size, buffer_size / 1024.0f);
+    }
+    
+    ESP_LOGI(TAG, "Allocating buffer: %zu bytes (%.2f KB)", buffer_size, buffer_size / 1024.0f);
+    
+    uint8_t *record_buffer = (uint8_t *)malloc(buffer_size);
+    if (!record_buffer) {
+        size_t free_heap = esp_get_free_heap_size();
+        ESP_LOGE(TAG, "Failed to allocate memory for recording");
+        ESP_LOGE(TAG, "Required: %zu bytes (%.2f KB), Free: %zu bytes (%.2f KB)",
+                buffer_size, buffer_size / 1024.0f, free_heap, free_heap / 1024.0f);
+        return ESP_ERR_NO_MEM;
+    }
+    
+    memset(record_buffer, 0, buffer_size);
+    
+    // ========== Phase 1: Recording ==========
+    ESP_LOGI(TAG, "Phase 1: Recording all TDM channels...");
+    
+    const size_t BLOCK_SIZE = 512;
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(record_duration_seconds * 1000 + 500);
+    TickType_t start_time = xTaskGetTickCount();
+    size_t bytes_read = 0;
+    
+    while (bytes_read < buffer_size) {
+        size_t read_size = (buffer_size - bytes_read > BLOCK_SIZE) ? BLOCK_SIZE : (buffer_size - bytes_read);
+        
+        esp_err_t ret = esp_codec_dev_read(record_dev, record_buffer + bytes_read, (int)read_size);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Record read error at %zu bytes: %s", bytes_read, esp_err_to_name(ret));
+            free(record_buffer);
+            return ESP_FAIL;
+        }
+        
+        bytes_read += read_size;
+        
+        // 进度提示
+        static size_t last_progress = 0;
+        size_t progress = (bytes_read * 100) / buffer_size;
+        if (progress >= last_progress + 25) {
+            ESP_LOGI(TAG, "Recording progress: %zu%%", progress);
+            last_progress = progress;
+        }
+        
+        // 超时检查
+        if ((xTaskGetTickCount() - start_time) > timeout_ticks) {
+            ESP_LOGW(TAG, "Record timeout reached, stopping early");
+            break;
+        }
+    }
+    
+    TickType_t end_time = xTaskGetTickCount();
+    uint32_t actual_duration_ms = pdTICKS_TO_MS(end_time - start_time);
+    
+    ESP_LOGI(TAG, "Recording completed! Actual: %.2f sec, Bytes: %zu",
+             actual_duration_ms / 1000.0f, bytes_read);
+    
+    // ========== Phase 2: Channel Extraction ==========
+    ESP_LOGI(TAG, "Phase 2: Splitting MIC data from %s stream...",
+             is_tdm_mode ? "TDM" : "Standard I2S");
+
+    channel_split_result_t split_result = split_recorded_channels(
+        record_buffer,
+        bytes_read,
+        fs,
+        is_tdm_mode,
+        mic_channels);
+
+    free(record_buffer);
+    record_buffer = nullptr;
+
+    if (split_result.status != ESP_OK) {
+        ESP_LOGE(TAG, "Channel splitting failed: %s", esp_err_to_name(split_result.status));
+        free_channel_split_result(split_result);
+        return split_result.status;
+    }
+
+    int16_t* target_samples = split_result.mic_buffers[target_channel];
+    if (!target_samples) {
+        ESP_LOGE(TAG, "Target MIC%u buffer unavailable after splitting", target_channel + 1);
+        free_channel_split_result(split_result);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    mic_channel_quality_t channel_quality[4] = {};
+    compute_split_channel_quality(split_result, channel_quality);
+    const mic_channel_quality_t& target_quality = channel_quality[target_channel];
+    const size_t extracted_samples = target_quality.sample_count;
+    const float target_duration_sec = extracted_samples
+                                          ? (static_cast<float>(extracted_samples) / static_cast<float>(fs.sample_rate))
+                                          : 0.0f;
+
+    ESP_LOGI(TAG, "Extracted %zu samples from MIC%u (%.2f seconds)",
+             extracted_samples, target_channel + 1, target_duration_sec);
+
+    ESP_LOGI(TAG, "=== MIC%u Audio Analysis Report ===", target_channel + 1);
+    ESP_LOGI(TAG, "  Total samples: %zu (%.2f seconds)", extracted_samples, target_duration_sec);
+    ESP_LOGI(TAG, "  Average amplitude: %ld", static_cast<long>(target_quality.average_abs_amplitude));
+    ESP_LOGI(TAG, "  Peak range: [%d, %d]", target_quality.min_value, target_quality.max_value);
+    ESP_LOGI(TAG, "  RMS Level: %.1f dB", target_quality.rms_db);
+    ESP_LOGI(TAG, "  Signal quality: %s", target_quality.average_abs_amplitude > 100 ? "GOOD" : "LOW");
+
+    if (target_quality.average_abs_amplitude > 100) {
+        ESP_LOGI(TAG, "Valid audio signal detected from MIC%u", target_channel + 1);
+    } else {
+        ESP_LOGW(TAG, "Low audio signal from MIC%u - check microphone connection/gain", target_channel + 1);
+    }
+    ESP_LOGI(TAG, "====================================");
+
+    ESP_LOGI(TAG, "=== All Channel Quality Summary ===");
+    for (int mic_index = 0; mic_index < 4; ++mic_index) {
+        const mic_channel_quality_t& mic_quality = channel_quality[mic_index];
+        if (!mic_quality.available) {
+            continue;
+        }
+
+        const char* marker = (mic_index == target_channel) ? " (target)" : "";
+        ESP_LOGI(TAG, "  MIC%u%s -> avg:%ld peak:[%d,%d] rms:%.1f dB signal:%s",
+                 mic_index + 1,
+                 marker,
+                 static_cast<long>(mic_quality.average_abs_amplitude),
+                 mic_quality.min_value,
+                 mic_quality.max_value,
+                 mic_quality.rms_db,
+                 mic_quality.average_abs_amplitude > 100 ? "GOOD" : "LOW");
+    }
+    ESP_LOGI(TAG, "====================================");
+
+    if (analysis_only) {
+        ESP_LOGI(TAG, "Analysis-only mode: Skipping playback phase");
+        free_channel_split_result(split_result);
+        ESP_LOGI(TAG, "=== Channel Analysis Completed ===");
+        return ESP_OK;
+    }
+
+    // 短暂延迟
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // ========== Phase 3: Playback ==========
+    ESP_LOGI(TAG, "Phase 3: Playing extracted MIC%u audio...", target_channel + 1);
+
+    start_time = xTaskGetTickCount();
+
+    const size_t bytes_to_write = extracted_samples * sizeof(int16_t);
+    esp_err_t ret = play_audio_buffer(
+        reinterpret_cast<const uint8_t*>(target_samples),
+        bytes_to_write,
+        static_cast<uint32_t>(fs.sample_rate),
+        AUDIO_CHANNELS_MONO,
+        I2S_DATA_BIT_WIDTH_16BIT,
+        AUDIO_PLAYBACK_BLOCKING);
+
+    end_time = xTaskGetTickCount();
+    uint32_t playback_duration_ms = pdTICKS_TO_MS(end_time - start_time);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Playback failed: %s", esp_err_to_name(ret));
+        free_channel_split_result(split_result);
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Playback completed! Duration: %.2f sec, Bytes: %zu",
+             playback_duration_ms / 1000.0f, bytes_to_write);
+
+    free_channel_split_result(split_result);
+
+    // 清空播放管线
+    esp_err_t clr_ret = clear_audio_pipeline(120);
+    if (clr_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to clear playback pipeline: %s", esp_err_to_name(clr_ret));
+    }
+
+    ESP_LOGI(TAG, "=== Channel Select Test Completed ===");
+    return ESP_OK;
+}
+
 esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seconds, bool loop_playback)
 {
     if (!es7210_initialized || !es8311_initialized) {
@@ -875,10 +1648,10 @@ esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seco
     ESP_LOGI(TAG, "=== Record and playback test (%lu seconds, loop: %s) ===", 
              record_duration_seconds, loop_playback ? "YES" : "NO");
     
-    // 获取当前音频格式信息
+    // 获取当前音频格式信息（使用录音设备的声道配置）
     esp_codec_dev_sample_info_t fs = {};
     fs.sample_rate = (uint32_t)this->sample_rate;
-    fs.channel = (this->audio_channels == AUDIO_CHANNELS_MONO) ? 1 : 2;
+    fs.channel = (this->rx_channels == AUDIO_CHANNELS_MONO) ? 1 : 2;
     fs.bits_per_sample = (uint32_t)this->bits_per_sample;
         
     // 计算缓冲区大小
@@ -949,12 +1722,21 @@ esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seco
             // 播放阶段
             ESP_LOGI(TAG, "Cycle #%d: Playing recorded audio...", cycle_count);
             
-            esp_err_t write_ret = esp_codec_dev_write(play_dev, data, buffer_size);
+            // 使用 play_audio_buffer 播放录音，支持自适应格式
+            esp_err_t write_ret = play_audio_buffer(
+                data,
+                bytes_read,
+                fs.sample_rate,
+                (fs.channel == 1) ? AUDIO_CHANNELS_MONO : AUDIO_CHANNELS_STEREO,
+                (i2s_data_bit_width_t)fs.bits_per_sample,
+                AUDIO_PLAYBACK_BLOCKING
+            );
+            
             if (write_ret != ESP_OK) {
                 ESP_LOGE(TAG, "Cycle #%d playback failed: %s", cycle_count, esp_err_to_name(write_ret));
                 // 播放失败不退出循环，继续下一轮录音
             } else {
-                ESP_LOGI(TAG, "Cycle #%d: Playback completed -> bytes written: %d", cycle_count, buffer_size);
+                ESP_LOGI(TAG, "Cycle #%d: Playback completed -> bytes played: %zu", cycle_count, bytes_read);
             }
             
             // 清理音频管道，避免循环间的音频残留
@@ -1014,11 +1796,20 @@ esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seco
         // 播放录音内容
         ESP_LOGI(TAG, "Playing recorded audio once...");
         
-        esp_err_t write_ret = esp_codec_dev_write(play_dev, data, buffer_size);
+        // 使用 play_audio_buffer 播放录音，支持自适应格式
+        esp_err_t write_ret = play_audio_buffer(
+            data,
+            bytes_read,
+            fs.sample_rate,
+            (fs.channel == 1) ? AUDIO_CHANNELS_MONO : AUDIO_CHANNELS_STEREO,
+            (i2s_data_bit_width_t)fs.bits_per_sample,
+            AUDIO_PLAYBACK_BLOCKING
+        );
+        
         if (write_ret != ESP_OK) {
             ESP_LOGE(TAG, "Playback failed: %s", esp_err_to_name(write_ret));
         } else {
-            ESP_LOGI(TAG, "Playback completed successfully -> bytes written: %d", buffer_size);
+            ESP_LOGI(TAG, "Playback completed successfully -> bytes played: %zu", bytes_read);
         }
         
         esp_err_t clear_ret = clear_audio_pipeline(80);
@@ -1083,36 +1874,63 @@ void audio_es_tools::set_i2s_pin_config(gpio_num_t bck_pin, gpio_num_t mck_pin, 
              bck_pin, mck_pin, data_in_pin, data_out_pin, ws_pin, pa_pin);
 }
 
-bool audio_es_tools::is_pcm_test_a_available() const
+bool audio_es_tools::is_pcm_candy_wind_1ch_16k_available() const
 {
-#ifdef USE_PCM_TEST_A
+#ifdef USE_PCM_CANDY_WIND_1CH_16K_16B_9S
     return true;
 #else
     return false;
 #endif
 }
 
-bool audio_es_tools::is_pcm_test_b_available() const
+bool audio_es_tools::is_pcm_candy_wind_1ch_44k_available() const
 {
-#ifdef USE_PCM_TEST_B
+#ifdef USE_PCM_CANDY_WIND_1CH_44K_16B_45S
     return true;
 #else
     return false;
 #endif
 }
 
-bool audio_es_tools::is_pcm_sine_440hz_available() const
+bool audio_es_tools::is_pcm_candy_wind_2ch_16k_available() const
 {
-#ifdef USE_PCM_SINE_440HZ
+#ifdef USE_PCM_CANDY_WIND_2CH_16K_16B_9S
     return true;
 #else
     return false;
 #endif
 }
 
-bool audio_es_tools::is_pcm_startup_1ch_available() const
+bool audio_es_tools::is_pcm_candy_wind_2ch_44k_available() const
 {
-#ifdef USE_PCM_STARTUP_1CH
+#ifdef USE_PCM_CANDY_WIND_2CH_44K_16B_45S
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool audio_es_tools::is_pcm_sine_440hz_2ch_16k_16b_10s_available() const
+{
+#ifdef USE_PCM_SINE_440HZ_2CH_16K_16B_10S
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool audio_es_tools::is_pcm_startup_1ch_16k_available() const
+{
+#ifdef USE_PCM_STARTUP_1CH_16K_16B_4S
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool audio_es_tools::is_pcm_startup_2ch_16k_available() const
+{
+#ifdef USE_PCM_STARTUP_2CH_16K_16B_4S
     return true;
 #else
     return false;
@@ -1123,19 +1941,31 @@ int audio_es_tools::get_available_pcm_count() const
 {
     int count = 0;
     
-#ifdef USE_PCM_TEST_A
+#ifdef USE_PCM_CANDY_WIND_1CH_16K_16B_9S
     count++;
 #endif
 
-#ifdef USE_PCM_TEST_B
+#ifdef USE_PCM_CANDY_WIND_1CH_44K_16B_45S
     count++;
 #endif
 
-#ifdef USE_PCM_STARTUP_1CH
+#ifdef USE_PCM_CANDY_WIND_2CH_16K_16B_9S
     count++;
 #endif
 
-#ifdef USE_PCM_SINE_440HZ
+#ifdef USE_PCM_CANDY_WIND_2CH_44K_16B_45S
+    count++;
+#endif
+
+#ifdef USE_PCM_STARTUP_1CH_16K_16B_4S
+    count++;
+#endif
+
+#ifdef USE_PCM_STARTUP_2CH_16K_16B_4S
+    count++;
+#endif
+
+#ifdef USE_PCM_SINE_440HZ_2CH_16K_16B_10S
     count++;
 #endif
 
@@ -1145,16 +1975,20 @@ int audio_es_tools::get_available_pcm_count() const
 const char* audio_es_tools::get_audio_file_name(audio_file_type_t audio_type) const
 {
     switch (audio_type) {
-        case AUDIO_FILE_TEST_A:
-            return "test_a.pcm";
-        case AUDIO_FILE_TEST_B:
-            return "test_b.pcm";
-        case AUDIO_FILE_STARTUP_1CH:
-            return "startup_1ch.pcm";
-        case AUDIO_FILE_SINE_440HZ:
-            return "sine_440Hz_30s_44100Hz_16bit_1ch.pcm";
-        case AUDIO_FILE_AUTO:
-            return "auto";
+        case AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S:
+            return "candy_wind_pcm_1ch_16k_16bit_9s.pcm";
+        case AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S:
+            return "candy_wind_pcm_1ch_44.1k_16bit_45.5s.pcm";
+        case AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S:
+            return "candy_wind_pcm_2ch_16k_16bit_9s.pcm";
+        case AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S:
+            return "candy_wind_pcm_2ch_44.1k_16bit_45.5s.pcm";
+        case AUDIO_FILE_STARTUP_1CH_16K_16B_4S:
+            return "startup_pcm_1ch_16k_16bit_4s.pcm";
+        case AUDIO_FILE_STARTUP_2CH_16K_16B_4S:
+            return "startup_pcm_2ch_16k_16bit_4s.pcm";
+        case AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S:
+            return "sine_440Hz_pcm_2ch_16k_16bit_10s.pcm";
         default:
             return "unknown";
     }
@@ -1163,22 +1997,173 @@ const char* audio_es_tools::get_audio_file_name(audio_file_type_t audio_type) co
 bool audio_es_tools::is_audio_file_available(audio_file_type_t audio_type) const
 {
     switch (audio_type) {
-        case AUDIO_FILE_TEST_A:
-            return is_pcm_test_a_available();
-        case AUDIO_FILE_TEST_B:
-            return is_pcm_test_b_available();
-        case AUDIO_FILE_STARTUP_1CH:
-            return is_pcm_startup_1ch_available();
-        case AUDIO_FILE_SINE_440HZ:
-            return is_pcm_sine_440hz_available();
-        case AUDIO_FILE_AUTO:
-            return (get_available_pcm_count() > 0);
+        case AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S:
+            return is_pcm_candy_wind_1ch_16k_available();
+        case AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S:
+            return is_pcm_candy_wind_1ch_44k_available();
+        case AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S:
+            return is_pcm_candy_wind_2ch_16k_available();
+        case AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S:
+            return is_pcm_candy_wind_2ch_44k_available();
+        case AUDIO_FILE_STARTUP_1CH_16K_16B_4S:
+            return is_pcm_startup_1ch_16k_available();
+        case AUDIO_FILE_STARTUP_2CH_16K_16B_4S:
+            return is_pcm_startup_2ch_16k_available();
+        case AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S:
+            return is_pcm_sine_440hz_2ch_16k_16b_10s_available();
         default:
             return false;
     }
 }
 
-esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type, bool check_stop_signal)
+// ============================================================================
+// 获取PCM数据和格式参数
+// ============================================================================
+
+esp_err_t audio_es_tools::get_pcm_data_and_format(audio_file_type_t audio_type,
+                                                   const uint8_t*& pcm_start,
+                                                   size_t& pcm_len,
+                                                   uint32_t& file_sample_rate_hz,
+                                                   audio_channels_t& file_channels,
+                                                   i2s_data_bit_width_t& file_bits)
+{
+    // 初始化输出参数
+    pcm_start = nullptr;
+    pcm_len = 0;
+    
+    // 根据文件类型获取PCM数据
+    switch (audio_type) {
+        case AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S:
+#ifdef USE_PCM_CANDY_WIND_1CH_16K_16B_9S
+            pcm_start = _binary_candy_wind_pcm_1ch_16k_16bit_9s_pcm_start;
+            pcm_len = _binary_candy_wind_pcm_1ch_16k_16bit_9s_pcm_end - _binary_candy_wind_pcm_1ch_16k_16bit_9s_pcm_start;
+#else
+            ESP_LOGE(TAG, "candy_wind_pcm_1ch_16k_16bit_9s.pcm not compiled in");
+            return ESP_ERR_NOT_SUPPORTED;
+#endif
+            break;
+
+        case AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S:
+#ifdef USE_PCM_CANDY_WIND_1CH_44K_16B_45S
+            pcm_start = _binary_candy_wind_pcm_1ch_44_1k_16bit_45_5s_pcm_start;
+            pcm_len = _binary_candy_wind_pcm_1ch_44_1k_16bit_45_5s_pcm_end - _binary_candy_wind_pcm_1ch_44_1k_16bit_45_5s_pcm_start;
+#else
+            ESP_LOGE(TAG, "candy_wind_pcm_1ch_44.1k_16bit_45.5s.pcm not compiled in");
+            return ESP_ERR_NOT_SUPPORTED;
+#endif
+            break;
+
+        case AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S:
+#ifdef USE_PCM_CANDY_WIND_2CH_16K_16B_9S
+            pcm_start = _binary_candy_wind_pcm_2ch_16k_16bit_9s_pcm_start;
+            pcm_len = _binary_candy_wind_pcm_2ch_16k_16bit_9s_pcm_end - _binary_candy_wind_pcm_2ch_16k_16bit_9s_pcm_start;
+#else
+            ESP_LOGE(TAG, "candy_wind_pcm_2ch_16k_16bit_9s.pcm not compiled in");
+            return ESP_ERR_NOT_SUPPORTED;
+#endif
+            break;
+
+        case AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S:
+#ifdef USE_PCM_CANDY_WIND_2CH_44K_16B_45S
+            pcm_start = _binary_candy_wind_pcm_2ch_44_1k_16bit_45_5s_pcm_start;
+            pcm_len = _binary_candy_wind_pcm_2ch_44_1k_16bit_45_5s_pcm_end - _binary_candy_wind_pcm_2ch_44_1k_16bit_45_5s_pcm_start;
+#else
+            ESP_LOGE(TAG, "candy_wind_pcm_2ch_44.1k_16bit_45.5s.pcm not compiled in");
+            return ESP_ERR_NOT_SUPPORTED;
+#endif
+            break;
+
+        case AUDIO_FILE_STARTUP_1CH_16K_16B_4S:
+#ifdef USE_PCM_STARTUP_1CH_16K_16B_4S
+            pcm_start = _binary_startup_pcm_1ch_16k_16bit_4s_pcm_start;
+            pcm_len = _binary_startup_pcm_1ch_16k_16bit_4s_pcm_end - _binary_startup_pcm_1ch_16k_16bit_4s_pcm_start;
+#else
+            ESP_LOGE(TAG, "startup_pcm_1ch_16k_16bit_4s.pcm not compiled in");
+            return ESP_ERR_NOT_SUPPORTED;
+#endif
+            break;
+
+        case AUDIO_FILE_STARTUP_2CH_16K_16B_4S:
+#ifdef USE_PCM_STARTUP_2CH_16K_16B_4S
+            pcm_start = _binary_startup_pcm_2ch_16k_16bit_4s_pcm_start;
+            pcm_len = _binary_startup_pcm_2ch_16k_16bit_4s_pcm_end - _binary_startup_pcm_2ch_16k_16bit_4s_pcm_start;
+#else
+            ESP_LOGE(TAG, "startup_pcm_2ch_16k_16bit_4s.pcm not compiled in");
+            return ESP_ERR_NOT_SUPPORTED;
+#endif
+            break;
+
+        case AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S:
+#ifdef USE_PCM_SINE_440HZ_2CH_16K_16B_10S
+            pcm_start = _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_start;
+            pcm_len = _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_end - _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_start;
+#else
+            ESP_LOGE(TAG, "sine_440Hz_pcm_2ch_16k_16bit_10s.pcm not compiled in");
+            return ESP_ERR_NOT_SUPPORTED;
+#endif
+            break;
+
+        default:
+            ESP_LOGE(TAG, "Invalid audio file type: %d", audio_type);
+            return ESP_ERR_INVALID_ARG;
+    }
+
+    // 验证PCM数据有效性
+    if (!pcm_start || pcm_len == 0) {
+        ESP_LOGE(TAG, "Invalid PCM data for %s", get_audio_file_name(audio_type));
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    // 设置文件格式参数（内置PCM文件的编解码格式是固定的）
+    switch (audio_type) {
+        case AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S:
+            file_sample_rate_hz = 16000;
+            file_channels = AUDIO_CHANNELS_STEREO;
+            file_bits = I2S_DATA_BIT_WIDTH_16BIT;
+            break;
+        case AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S:
+            file_sample_rate_hz = 16000;
+            file_channels = AUDIO_CHANNELS_MONO;
+            file_bits = I2S_DATA_BIT_WIDTH_16BIT;
+            break;
+        case AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S:
+            file_sample_rate_hz = 44100;
+            file_channels = AUDIO_CHANNELS_MONO;
+            file_bits = I2S_DATA_BIT_WIDTH_16BIT;
+            break;
+        case AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S:
+            file_sample_rate_hz = 16000;
+            file_channels = AUDIO_CHANNELS_STEREO;
+            file_bits = I2S_DATA_BIT_WIDTH_16BIT;
+            break;
+        case AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S:
+            file_sample_rate_hz = 44100;
+            file_channels = AUDIO_CHANNELS_STEREO;
+            file_bits = I2S_DATA_BIT_WIDTH_16BIT;
+            break;
+        case AUDIO_FILE_STARTUP_1CH_16K_16B_4S:
+            file_sample_rate_hz = 16000;
+            file_channels = AUDIO_CHANNELS_MONO;
+            file_bits = I2S_DATA_BIT_WIDTH_16BIT;
+            break;
+        case AUDIO_FILE_STARTUP_2CH_16K_16B_4S:
+            file_sample_rate_hz = 16000;
+            file_channels = AUDIO_CHANNELS_STEREO;
+            file_bits = I2S_DATA_BIT_WIDTH_16BIT;
+            break;
+        default:
+            // 对于未明确指定的文件类型，使用默认值（已在调用前初始化）
+            break;
+    }
+
+    return ESP_OK;
+}
+
+// ============================================================================
+// 播放音频文件（内部实现）
+// ============================================================================
+
+esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type, bool check_stop_signal, float duration_limit_seconds)
 {
     // 边界检查
     if (audio_type < 0 || audio_type >= AUDIO_FILE_MAX) {
@@ -1204,89 +2189,93 @@ esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type, boo
         return ESP_ERR_NOT_FOUND;
     }
 
-    ESP_LOGI(TAG, "Playing audio file: %s", get_audio_file_name(audio_type));
+    if (duration_limit_seconds > 0.0f) {
+        ESP_LOGI(TAG, "Playing audio file: %s (limited to %.1f seconds)", get_audio_file_name(audio_type), duration_limit_seconds);
+    } else {
+        ESP_LOGI(TAG, "Playing audio file: %s (full file)", get_audio_file_name(audio_type));
+    }
 
+    // 获取PCM数据和格式参数
     const uint8_t *pcm_start = nullptr;
     size_t pcm_len = 0;
-    audio_file_type_t selected_type = audio_type;
-
-    // 如果是自动模式，选择第一个可用的文件
-    if (audio_type == AUDIO_FILE_AUTO) {
-        if (is_pcm_test_a_available()) {
-            selected_type = AUDIO_FILE_TEST_A;
-        } else if (is_pcm_test_b_available()) {
-            selected_type = AUDIO_FILE_TEST_B;
-        } else if (is_pcm_startup_1ch_available()) {
-            selected_type = AUDIO_FILE_STARTUP_1CH;
-        } else if (is_pcm_sine_440hz_available()) {
-            selected_type = AUDIO_FILE_SINE_440HZ;
-        } else {
-            ESP_LOGE(TAG, "No audio files available");
-            return ESP_ERR_NOT_FOUND;
-        }
-        ESP_LOGI(TAG, "Auto mode selected: %s", get_audio_file_name(selected_type));
-    }
-
-    // 根据选择的类型获取PCM数据
-    switch (selected_type) {
-        case AUDIO_FILE_TEST_A:
-#ifdef USE_PCM_TEST_A
-            pcm_start = _binary_test_a_pcm_start;
-            pcm_len = _binary_test_a_pcm_end - _binary_test_a_pcm_start;
-#else
-            ESP_LOGE(TAG, "test_a.pcm not compiled in");
-            return ESP_ERR_NOT_SUPPORTED;
-#endif
-            break;
-
-        case AUDIO_FILE_TEST_B:
-#ifdef USE_PCM_TEST_B
-            pcm_start = _binary_test_b_pcm_start;
-            pcm_len = _binary_test_b_pcm_end - _binary_test_b_pcm_start;
-#else
-            ESP_LOGE(TAG, "test_b.pcm not compiled in");
-            return ESP_ERR_NOT_SUPPORTED;
-#endif
-            break;
-
-        case AUDIO_FILE_STARTUP_1CH:
-#ifdef USE_PCM_STARTUP_1CH
-            pcm_start = _binary_startup_1ch_pcm_start;
-            pcm_len = _binary_startup_1ch_pcm_end - _binary_startup_1ch_pcm_start;
-#else
-            ESP_LOGE(TAG, "startup_1ch.pcm not compiled in");
-            return ESP_ERR_NOT_SUPPORTED;
-#endif
-            break;
-
-        case AUDIO_FILE_SINE_440HZ:
-#ifdef USE_PCM_SINE_440HZ
-            pcm_start = _binary_sine_440Hz_30s_44100Hz_16bit_1ch_pcm_start;
-            pcm_len = _binary_sine_440Hz_30s_44100Hz_16bit_1ch_pcm_end - _binary_sine_440Hz_30s_44100Hz_16bit_1ch_pcm_start;
-#else
-            ESP_LOGE(TAG, "sine_440Hz_30s_44100Hz_16bit_1ch.pcm not compiled in");
-            return ESP_ERR_NOT_SUPPORTED;
-#endif
-            break;
-
-        default:
-            ESP_LOGE(TAG, "Invalid audio file type: %d", selected_type);
-            return ESP_ERR_INVALID_ARG;
-    }
-
-    if (!pcm_start || pcm_len == 0) {
-        ESP_LOGE(TAG, "Invalid PCM data for %s", get_audio_file_name(selected_type));
-        return ESP_ERR_INVALID_SIZE;
+    uint32_t file_sample_rate_hz = static_cast<uint32_t>(sample_rate);
+    audio_channels_t file_channels = tx_channels;
+    i2s_data_bit_width_t file_bits = bits_per_sample;
+    
+    esp_err_t ret = get_pcm_data_and_format(audio_type, pcm_start, pcm_len, 
+                                             file_sample_rate_hz, file_channels, file_bits);
+    if (ret != ESP_OK) {
+        return ret;
     }
 
     ESP_LOGI(TAG, "PCM data size: %zu bytes", pcm_len);
 
-    // 分块播放PCM数据，支持中途停止
+    const uint32_t system_sample_rate_hz = static_cast<uint32_t>(sample_rate);
+    const uint32_t system_bits = static_cast<uint32_t>(bits_per_sample);
+    const uint32_t system_channels = static_cast<uint32_t>(tx_channels);
+
+    uint8_t* converted_buffer = nullptr;
+    size_t converted_size = 0;
+
+    ret = remix_convert_pcm_to_format(pcm_start,
+                                      pcm_len,
+                                      file_sample_rate_hz,
+                                      static_cast<uint32_t>(file_channels),
+                                      static_cast<uint32_t>(file_bits),
+                                      system_sample_rate_hz,
+                                      system_channels,
+                                      system_bits,
+                                      &converted_buffer,
+                                      &converted_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to convert audio format: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    const bool using_converted = converted_buffer != nullptr;
+    uint8_t* playback_buffer = using_converted ? converted_buffer : const_cast<uint8_t*>(pcm_start);
+    const size_t playback_size = using_converted ? converted_size : pcm_len;
+
+    if (using_converted) {
+        ESP_LOGI(TAG, "Audio format converted: %u Hz, %u bit, %u ch -> %u Hz, %u bit, %u ch (%zu -> %zu bytes)",
+                 file_sample_rate_hz,
+                 static_cast<uint32_t>(file_bits),
+                 static_cast<uint32_t>(file_channels),
+                 system_sample_rate_hz,
+                 system_bits,
+                 system_channels,
+                 pcm_len,
+                 playback_size);
+    } else {
+        ESP_LOGI(TAG, "Audio format matches system configuration");
+    }
+
+    size_t bytes_to_play = playback_size;
+    if (duration_limit_seconds > 0) {
+        const uint32_t bytes_per_frame = (system_bits * system_channels) / 8;
+
+        if (bytes_per_frame == 0 || system_sample_rate_hz == 0) {
+            ESP_LOGW(TAG, "Duration limit skipped due to invalid system format (bytes_per_frame=%u, sample_rate=%u)",
+                     bytes_per_frame, system_sample_rate_hz);
+        } else {
+            const size_t bytes_per_second = static_cast<size_t>(system_sample_rate_hz) * bytes_per_frame;
+            const size_t limited_bytes = static_cast<size_t>(bytes_per_second * duration_limit_seconds);
+
+            if (limited_bytes < bytes_to_play) {
+                bytes_to_play = limited_bytes;
+                ESP_LOGI(TAG, "Duration limit: will play %zu bytes out of %zu bytes", bytes_to_play, playback_size);
+            } else {
+                ESP_LOGI(TAG, "Duration limit (%.1f s) exceeds file length, playing full file", duration_limit_seconds);
+            }
+        }
+    }
+
+    // 分块播放PCM数据,支持中途停止
     const size_t CHUNK_SIZE = 4096;  // 每次写4KB数据
     size_t bytes_written = 0;
-    esp_err_t ret = ESP_OK;
+    ret = ESP_OK;
     
-    while (bytes_written < pcm_len) {
+    while (bytes_written < bytes_to_play) {
         // 检查停止信号（仅在异步模式下）
         if (check_stop_signal) {
             uint32_t notification_value = 0;
@@ -1297,12 +2286,15 @@ esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type, boo
             }
         }
         
-        size_t remaining = pcm_len - bytes_written;
+        size_t remaining = bytes_to_play - bytes_written;
         size_t to_write = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
         
-        ret = esp_codec_dev_write(play_dev, (uint8_t*)(pcm_start + bytes_written), to_write);
+    ret = esp_codec_dev_write(play_dev, playback_buffer + bytes_written, to_write);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to write audio chunk at offset %zu: %s", bytes_written, esp_err_to_name(ret));
+            if (using_converted) {
+                heap_caps_free(converted_buffer);
+            }
             return ret;
         }
         
@@ -1310,27 +2302,232 @@ esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type, boo
     }
     
     if (ret == ESP_ERR_INVALID_STATE) {
-        ESP_LOGI(TAG, "Playback interrupted by stop signal at %zu/%zu bytes", bytes_written, pcm_len);
+        ESP_LOGI(TAG, "Playback interrupted by stop signal at %zu/%zu bytes", bytes_written, bytes_to_play);
+        // 即使中断也要清空管道,避免残留数据
+        // 先临时降低音量，减少清理时的杂音
+        float saved_volume = volume;
+        set_volume(0.0);
+        vTaskDelay(pdMS_TO_TICKS(20));  // 等待音量过渡
+        
+        esp_err_t clear_ret = clear_audio_pipeline(150);
+        if (clear_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to clear audio pipeline after interruption: %s", esp_err_to_name(clear_ret));
+        }
+        
+        // 恢复音量
+        set_volume(saved_volume);
+        if (using_converted) {
+            heap_caps_free(converted_buffer);
+        }
         return ret;
     }
 
     ESP_LOGI(TAG, "Audio playback completed successfully (%zu bytes)", bytes_written);
     
-    // 仅在完整播放完成时清理管道
-    if (bytes_written == pcm_len) {
-        esp_err_t clear_ret = clear_audio_pipeline(80);
-        if (clear_ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to clear audio pipeline: %s", esp_err_to_name(clear_ret));
-        }
+    // 播放完成时清理管道,清空残留数据
+    // 先临时降低音量到10%，减少管道清理时的杂音
+    float saved_volume = volume;
+    set_volume(10.0);
+    vTaskDelay(pdMS_TO_TICKS(20));  // 等待音量平滑过渡
+    
+    // 使用更长的静音时间彻底清除硬件缓冲区
+    esp_err_t clear_ret = clear_audio_pipeline(200);
+    if (clear_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to clear audio pipeline: %s", esp_err_to_name(clear_ret));
+    }
+    
+    // 恢复原始音量
+    set_volume(saved_volume);
+
+    if (using_converted) {
+        heap_caps_free(converted_buffer);
     }
 
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::play_audio_file(audio_file_type_t audio_type, audio_playback_mode_t mode)
+esp_err_t audio_es_tools::play_audio_buffer_impl(const uint8_t* buffer, size_t buffer_size, 
+                                                   uint32_t buffer_sample_rate_hz, audio_channels_t buffer_channels, 
+                                                   i2s_data_bit_width_t buffer_bits,
+                                                   bool check_stop_signal, float duration_limit_seconds)
+{
+    // 参数验证
+    if (!buffer || buffer_size == 0) {
+        ESP_LOGE(TAG, "Invalid buffer parameters");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (buffer_sample_rate_hz == 0) {
+        ESP_LOGE(TAG, "Invalid sample rate: %u Hz", buffer_sample_rate_hz);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 仅要求播放设备已准备
+    if (!play_dev || !es8311_initialized) {
+        ESP_LOGE(TAG, "Playback device not ready");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (duration_limit_seconds > 0.0f) {
+        ESP_LOGI(TAG, "Playing audio buffer (%zu bytes, %u Hz, %u ch, %u bit) - limited to %.1f seconds", 
+                 buffer_size, buffer_sample_rate_hz, 
+                 static_cast<uint32_t>(buffer_channels), 
+                 static_cast<uint32_t>(buffer_bits),
+                 duration_limit_seconds);
+    } else {
+        ESP_LOGI(TAG, "Playing audio buffer (%zu bytes, %u Hz, %u ch, %u bit) - full buffer", 
+                 buffer_size, buffer_sample_rate_hz, 
+                 static_cast<uint32_t>(buffer_channels), 
+                 static_cast<uint32_t>(buffer_bits));
+    }
+
+    const uint32_t system_sample_rate_hz = static_cast<uint32_t>(sample_rate);
+    const uint32_t system_bits = static_cast<uint32_t>(bits_per_sample);
+    const uint32_t system_channels = static_cast<uint32_t>(tx_channels);
+
+    uint8_t* converted_buffer = nullptr;
+    size_t converted_size = 0;
+    esp_err_t ret = ESP_OK;
+
+    // 检查是否需要格式转换
+    const bool need_conversion = (buffer_sample_rate_hz != system_sample_rate_hz) ||
+                                  (static_cast<uint32_t>(buffer_channels) != system_channels) ||
+                                  (static_cast<uint32_t>(buffer_bits) != system_bits);
+
+    if (need_conversion) {
+        ret = remix_convert_pcm_to_format(buffer,
+                                          buffer_size,
+                                          buffer_sample_rate_hz,
+                                          static_cast<uint32_t>(buffer_channels),
+                                          static_cast<uint32_t>(buffer_bits),
+                                          system_sample_rate_hz,
+                                          system_channels,
+                                          system_bits,
+                                          &converted_buffer,
+                                          &converted_size);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to convert audio format: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        ESP_LOGI(TAG, "Audio format converted: %u Hz, %u bit, %u ch -> %u Hz, %u bit, %u ch (%zu -> %zu bytes)",
+                 buffer_sample_rate_hz,
+                 static_cast<uint32_t>(buffer_bits),
+                 static_cast<uint32_t>(buffer_channels),
+                 system_sample_rate_hz,
+                 system_bits,
+                 system_channels,
+                 buffer_size,
+                 converted_size);
+    } else {
+        ESP_LOGI(TAG, "Audio format matches system configuration, no conversion needed");
+    }
+
+    const bool using_converted = converted_buffer != nullptr;
+    const uint8_t* playback_buffer = using_converted ? converted_buffer : buffer;
+    size_t playback_size = using_converted ? converted_size : buffer_size;
+
+    // 计算播放时长限制
+    size_t bytes_to_play = playback_size;
+    if (duration_limit_seconds > 0) {
+        const uint32_t bytes_per_frame = (system_bits * system_channels) / 8;
+
+        if (bytes_per_frame == 0 || system_sample_rate_hz == 0) {
+            ESP_LOGW(TAG, "Duration limit skipped due to invalid system format (bytes_per_frame=%u, sample_rate=%u)",
+                     bytes_per_frame, system_sample_rate_hz);
+        } else {
+            const size_t bytes_per_second = static_cast<size_t>(system_sample_rate_hz) * bytes_per_frame;
+            const size_t limited_bytes = static_cast<size_t>(bytes_per_second * duration_limit_seconds);
+
+            if (limited_bytes < bytes_to_play) {
+                bytes_to_play = limited_bytes;
+                ESP_LOGI(TAG, "Duration limit: will play %zu bytes out of %zu bytes", bytes_to_play, playback_size);
+            } else {
+                ESP_LOGI(TAG, "Duration limit (%.1f s) exceeds buffer length, playing full buffer", duration_limit_seconds);
+            }
+        }
+    }
+
+    // 分块播放PCM数据，支持中途停止
+    const size_t CHUNK_SIZE = 4096;  // 每次写4KB数据
+    size_t bytes_written = 0;
+    ret = ESP_OK;
+    
+    while (bytes_written < bytes_to_play) {
+        // 检查停止信号（仅在异步模式下）
+        if (check_stop_signal) {
+            uint32_t notification_value = 0;
+            if (xTaskNotifyWait(0, 0, &notification_value, 0) == pdTRUE) {
+                ESP_LOGI(TAG, "Received stop signal during playback, stopping gracefully...");
+                ret = ESP_ERR_INVALID_STATE;  // 使用特殊错误码表示被中断
+                break;
+            }
+        }
+        
+        size_t remaining = bytes_to_play - bytes_written;
+        size_t to_write = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
+        
+        ret = esp_codec_dev_write(play_dev, const_cast<uint8_t*>(playback_buffer + bytes_written), to_write);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to write audio chunk at offset %zu: %s", bytes_written, esp_err_to_name(ret));
+            if (using_converted) {
+                heap_caps_free(converted_buffer);
+            }
+            return ret;
+        }
+        
+        bytes_written += to_write;
+    }
+    
+    if (ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGI(TAG, "Playback interrupted by stop signal at %zu/%zu bytes", bytes_written, bytes_to_play);
+        // 即使中断也要清空管道，避免残留数据
+        // 先临时降低音量，减少清理时的杂音
+        float saved_volume = volume;
+        set_volume(0.0);
+        vTaskDelay(pdMS_TO_TICKS(20));  // 等待音量过渡
+        
+        esp_err_t clear_ret = clear_audio_pipeline(150);
+        if (clear_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to clear audio pipeline after interruption: %s", esp_err_to_name(clear_ret));
+        }
+        
+        // 恢复音量
+        set_volume(saved_volume);
+        if (using_converted) {
+            heap_caps_free(converted_buffer);
+        }
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Audio buffer playback completed successfully (%zu bytes)", bytes_written);
+    
+    // 播放完成时清理管道，清空残留数据
+    // 先临时降低音量到10%，减少管道清理时的杂音
+    float saved_volume = volume;
+    set_volume(10.0);
+    vTaskDelay(pdMS_TO_TICKS(20));  // 等待音量平滑过渡
+    
+    // 使用更长的静音时间彻底清除硬件缓冲区
+    esp_err_t clear_ret = clear_audio_pipeline(200);
+    if (clear_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to clear audio pipeline: %s", esp_err_to_name(clear_ret));
+    }
+    
+    // 恢复原始音量
+    set_volume(saved_volume);
+
+    if (using_converted) {
+        heap_caps_free(converted_buffer);
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t audio_es_tools::play_audio_file(audio_file_type_t audio_type, audio_playback_mode_t mode, float duration_limit_seconds)
 {
     if (mode == AUDIO_PLAYBACK_BLOCKING) {
-        return play_audio_file_impl(audio_type, false);  // 阻塞模式不检查停止信号
+        return play_audio_file_impl(audio_type, false, duration_limit_seconds);  // 阻塞模式不检查停止信号
     }
 
     if (playback_task_handle) {
@@ -1338,16 +2535,20 @@ esp_err_t audio_es_tools::play_audio_file(audio_file_type_t audio_type, audio_pl
         return ESP_ERR_INVALID_STATE;
     }
 
-    playback_task_args* args = new (std::nothrow) playback_task_args{this, audio_type};
+    playback_task_args* args = static_cast<playback_task_args*>(calloc(1, sizeof(playback_task_args)));
     if (!args) {
         ESP_LOGE(TAG, "Failed to allocate playback task args");
         return ESP_ERR_NO_MEM;
     }
 
+    args->instance = this;
+    args->audio_type = audio_type;
+    args->duration_limit_seconds = duration_limit_seconds;
+
     BaseType_t task_ret = xTaskCreate(playback_task_entry, "audio_play_task", 4096, args, 5, &playback_task_handle);
     if (task_ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create playback task");
-        delete args;
+        free(args);
         playback_task_handle = nullptr;
         return ESP_FAIL;
     }
@@ -1356,17 +2557,88 @@ esp_err_t audio_es_tools::play_audio_file(audio_file_type_t audio_type, audio_pl
     return ESP_OK;
 }
 
+esp_err_t audio_es_tools::play_audio_buffer(const uint8_t* buffer, size_t buffer_size, 
+                                             uint32_t buffer_sample_rate_hz, audio_channels_t buffer_channels, 
+                                             i2s_data_bit_width_t buffer_bits,
+                                             audio_playback_mode_t mode, 
+                                             float duration_limit_seconds)
+{
+    // 参数验证
+    if (!buffer || buffer_size == 0) {
+        ESP_LOGE(TAG, "Invalid buffer parameters");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (buffer_sample_rate_hz == 0) {
+        ESP_LOGE(TAG, "Invalid sample rate: %u Hz", buffer_sample_rate_hz);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 阻塞模式：直接播放
+    if (mode == AUDIO_PLAYBACK_BLOCKING) {
+        return play_audio_buffer_impl(buffer, buffer_size, 
+                                       buffer_sample_rate_hz, buffer_channels, buffer_bits,
+                                       false, duration_limit_seconds);
+    }
+
+    // 异步模式：创建播放任务
+    if (playback_task_handle) {
+        ESP_LOGW(TAG, "Playback task already running");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 为异步播放分配并复制缓冲区（因为调用者可能在函数返回后释放原始缓冲区）
+    uint8_t* buffer_copy = static_cast<uint8_t*>(heap_caps_malloc(buffer_size, MALLOC_CAP_8BIT));
+    if (!buffer_copy) {
+        ESP_LOGE(TAG, "Failed to allocate buffer copy for async playback (%zu bytes)", buffer_size);
+        return ESP_ERR_NO_MEM;
+    }
+    memcpy(buffer_copy, buffer, buffer_size);
+
+    buffer_playback_task_args* args = static_cast<buffer_playback_task_args*>(calloc(1, sizeof(buffer_playback_task_args)));
+    if (!args) {
+        ESP_LOGE(TAG, "Failed to allocate buffer playback task args");
+        heap_caps_free(buffer_copy);
+        return ESP_ERR_NO_MEM;
+    }
+
+    args->instance = this;
+    args->buffer = buffer_copy;
+    args->buffer_size = buffer_size;
+    args->buffer_sample_rate_hz = buffer_sample_rate_hz;
+    args->buffer_channels = buffer_channels;
+    args->buffer_bits = buffer_bits;
+    args->duration_limit_seconds = duration_limit_seconds;
+    args->own_buffer = true;  // 任务需要释放buffer_copy
+
+    BaseType_t task_ret = xTaskCreate(buffer_playback_task_entry, "audio_buf_play", 4096, args, 5, &playback_task_handle);
+    if (task_ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create buffer playback task");
+        heap_caps_free(buffer_copy);
+        free(args);
+        playback_task_handle = nullptr;
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Async buffer playback task started (%zu bytes, %u Hz, %u ch, %u bit)", 
+             buffer_size, buffer_sample_rate_hz, 
+             static_cast<uint32_t>(buffer_channels), 
+             static_cast<uint32_t>(buffer_bits));
+    return ESP_OK;
+}
+
 void audio_es_tools::playback_task_entry(void* param)
 {
     auto* args = static_cast<playback_task_args*>(param);
     audio_es_tools* instance = args->instance;
     audio_file_type_t audio_type = args->audio_type;
-    delete args;
+    uint32_t duration_limit_seconds = args->duration_limit_seconds;
+    free(args);
 
     ESP_LOGI(TAG, "Playback task started, ready to receive stop signals");
     
     // 异步模式：启用停止信号检查
-    esp_err_t result = instance->play_audio_file_impl(audio_type, true);
+    esp_err_t result = instance->play_audio_file_impl(audio_type, true, duration_limit_seconds);
     
     if (result == ESP_ERR_INVALID_STATE) {
         // 被停止信号中断
@@ -1394,6 +2666,63 @@ void audio_es_tools::playback_task_entry(void* param)
         ESP_LOGE(TAG, "Async playback failed for %s: %s", instance->get_audio_file_name(audio_type), esp_err_to_name(result));
     } else {
         ESP_LOGI(TAG, "Playback task completed normally");
+    }
+
+    instance->playback_task_handle = nullptr;
+    vTaskDelete(nullptr);
+}
+
+void audio_es_tools::buffer_playback_task_entry(void* param)
+{
+    auto* args = static_cast<buffer_playback_task_args*>(param);
+    audio_es_tools* instance = args->instance;
+    const uint8_t* buffer = args->buffer;
+    size_t buffer_size = args->buffer_size;
+    uint32_t buffer_sample_rate_hz = args->buffer_sample_rate_hz;
+    audio_channels_t buffer_channels = args->buffer_channels;
+    i2s_data_bit_width_t buffer_bits = args->buffer_bits;
+    float duration_limit_seconds = args->duration_limit_seconds;
+    bool own_buffer = args->own_buffer;
+    free(args);
+
+    ESP_LOGI(TAG, "Buffer playback task started, ready to receive stop signals");
+    
+    // 异步模式：启用停止信号检查
+    esp_err_t result = instance->play_audio_buffer_impl(buffer, buffer_size,
+                                                         buffer_sample_rate_hz, buffer_channels, buffer_bits,
+                                                         true, duration_limit_seconds);
+    
+    if (result == ESP_ERR_INVALID_STATE) {
+        // 被停止信号中断
+        ESP_LOGI(TAG, "Buffer playback interrupted by stop request, performing cleanup...");
+        
+        // 快速静音
+        float original_volume = instance->volume;
+        instance->set_volume(0.0);
+        vTaskDelay(pdMS_TO_TICKS(30));
+        
+        // 清理音频管道
+        esp_err_t clear_ret = instance->clear_audio_pipeline(200);
+        if (clear_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to clear pipeline after stop: %s", esp_err_to_name(clear_ret));
+        } else {
+            // 二次清理确保彻底
+            vTaskDelay(pdMS_TO_TICKS(30));
+            instance->clear_audio_pipeline(100);
+        }
+        
+        // 恢复音量
+        instance->set_volume(original_volume);
+        ESP_LOGI(TAG, "Buffer playback stopped and cleanup completed");
+    } else if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Async buffer playback failed: %s", esp_err_to_name(result));
+    } else {
+        ESP_LOGI(TAG, "Buffer playback task completed normally");
+    }
+
+    // 释放缓冲区（如果需要）
+    if (own_buffer && buffer) {
+        heap_caps_free(const_cast<uint8_t*>(buffer));
     }
 
     instance->playback_task_handle = nullptr;
@@ -1464,9 +2793,9 @@ esp_err_t audio_es_tools::clear_audio_pipeline(uint32_t silence_duration_ms)
 
     ESP_LOGI(TAG, "Clearing audio pipeline with %lu ms silence...", silence_duration_ms);
 
-    // 计算静音数据大小
+    // 计算静音数据大小（使用播放设备的声道配置）
     uint32_t sample_rate_hz = (uint32_t)sample_rate;
-    uint32_t channels = (uint32_t)audio_channels;
+    uint32_t channels = (uint32_t)tx_channels;
     uint32_t bits_per_sample_val = (uint32_t)bits_per_sample;
     uint32_t bytes_per_sample = (bits_per_sample_val * channels) / 8;
     size_t silence_size = (sample_rate_hz * bytes_per_sample * silence_duration_ms) / 1000;
@@ -1506,66 +2835,6 @@ esp_err_t audio_es_tools::clear_audio_pipeline(uint32_t silence_duration_ms)
     vTaskDelay(pdMS_TO_TICKS(silence_duration_ms + 50));
     ESP_LOGI(TAG, "Audio pipeline cleared successfully");
     return ESP_OK;
-}
-
-esp_err_t audio_es_tools::play_all_available_files() const
-{
-    if (!play_dev || !es8311_initialized) {
-        ESP_LOGE(TAG, "Playback device not ready");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    ESP_LOGI(TAG, "Playing all available audio files...");
-    
-    int played_count = 0;
-    esp_err_t last_error = ESP_OK;
-
-    // 使用AUDIO_FILE_MAX遍历所有枚举值
-    for (int i = 0; i < AUDIO_FILE_MAX; i++) {
-        audio_file_type_t audio_type = (audio_file_type_t)i;
-        
-        // 跳过自动模式，因为它不是实际的文件
-        if (audio_type == AUDIO_FILE_AUTO) {
-            continue;
-        }
-        
-        // 检查文件是否可用
-        if (is_audio_file_available(audio_type)) {
-            ESP_LOGI(TAG, "Playing file %d/%d: %s", 
-                     played_count + 1, get_available_pcm_count(), 
-                     get_audio_file_name(audio_type));
-            
-            // 这里需要使用const_cast，因为play_audio_file不是const函数
-            esp_err_t ret = const_cast<audio_es_tools*>(this)->play_audio_file(audio_type);
-            
-            if (ret == ESP_OK) {
-                played_count++;
-                
-                // 额外清理音频管道，确保没有残留声音
-                ret = const_cast<audio_es_tools*>(this)->clear_audio_pipeline(150);
-                if (ret != ESP_OK) {
-                    ESP_LOGW(TAG, "Failed to clear pipeline after %s", get_audio_file_name(audio_type));
-                }
-                
-                // 文件间播放间隔，避免音频重叠
-                vTaskDelay(pdMS_TO_TICKS(800));
-            } else {
-                ESP_LOGW(TAG, "Failed to play %s: %s", 
-                         get_audio_file_name(audio_type), esp_err_to_name(ret));
-                last_error = ret;
-            }
-        } else {
-            ESP_LOGI(TAG, "Skipping unavailable file: %s", get_audio_file_name(audio_type));
-        }
-    }
-
-    if (played_count == 0) {
-        ESP_LOGW(TAG, "No audio files were available to play");
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    ESP_LOGI(TAG, "Completed playing %d audio files", played_count);
-    return last_error;
 }
 
 esp_err_t audio_es_tools::set_volume(float volume_value)
@@ -1633,6 +2902,103 @@ esp_err_t audio_es_tools::set_audio_levels(float volume, float gain)
     }
     
     ESP_LOGI(TAG, "Audio levels configured successfully - Volume: %.1f, Gain: %.1f dB", volume, gain);
+    return ESP_OK;
+}
+
+esp_err_t audio_es_tools::es7210_set_mic_channel_gain(audio_mic_channel_t mic_channels_to_set, es7210_mic_gain_t gain)
+{
+    // 检查 ES7210 是否已初始化
+    if (!es7210_initialized) {
+        ESP_LOGE(TAG, "ES7210 not initialized, cannot set channel gain");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 检查录音设备句柄是否可用
+    if (!record_dev) {
+        ESP_LOGE(TAG, "ES7210 record device not available");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 检查要设置的通道是否是已初始化通道的子集
+    if ((mic_channels_to_set & ~mic_channels) != 0) {
+        ESP_LOGE(TAG, "Invalid channel mask 0x%02X, not a subset of initialized channels 0x%02X",
+                 mic_channels_to_set, mic_channels);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 增益值范围检查：0-14对应0dB-37.5dB
+    uint8_t gain_reg_value = static_cast<uint8_t>(gain);
+    if (gain_reg_value > 14) {
+        ESP_LOGE(TAG, "Invalid gain register value %d, must be 0-14", gain_reg_value);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // 计算实际dB值用于日志显示
+    static const float gain_db_table[15] = {
+        0.0f, 3.0f, 6.0f, 9.0f, 12.0f, 15.0f, 18.0f, 21.0f, 
+        24.0f, 27.0f, 30.0f, 33.0f, 34.5f, 36.0f, 37.5f
+    };
+    float actual_gain_db = gain_db_table[gain_reg_value];
+    
+    // ES7210 麦克风增益寄存器地址:
+    // 0x43 = MIC1_GAIN, 0x44 = MIC2_GAIN, 0x45 = MIC3_GAIN, 0x46 = MIC4_GAIN
+    // MIC1GAIN_SETTING 占 bit[3:0]，其他位需保留
+    const uint8_t gain_regs[4] = {0x43, 0x44, 0x45, 0x46};
+    
+    // 遍历所有通道，先读后写对应的增益寄存器
+    for (int ch = 0; ch < 4; ch++) {
+        if (mic_channels_to_set & (1 << ch)) {
+            // 1. 先读取当前寄存器值
+            int current_val = 0;
+            int ret = esp_codec_dev_read_reg(record_dev, gain_regs[ch], &current_val);
+            
+            if (ret != ESP_CODEC_DEV_OK) {
+                ESP_LOGE(TAG, "Failed to read CH%d gain register (reg=0x%02X), ret=%d", 
+                         ch + 1, gain_regs[ch], ret);
+                return ESP_FAIL;
+            }
+            
+            // 2. 保留高4位（bit[7:4]），只修改低4位（bit[3:0]）
+            int new_val = (current_val & 0xF0) | (gain_reg_value & 0x0F);
+            
+            // 3. 写回修改后的值
+            ret = esp_codec_dev_write_reg(record_dev, gain_regs[ch], new_val);
+            
+            if (ret != ESP_CODEC_DEV_OK) {
+                ESP_LOGE(TAG, "Failed to write gain to CH%d (reg=0x%02X), ret=%d", 
+                         ch + 1, gain_regs[ch], ret);
+                return ESP_FAIL;
+            }
+
+            // 确保对应声道未被数字静音，允许即时生效
+            const uint8_t mute_reg = (ch < 2) ? 0x14u : 0x15u;
+            const uint8_t mute_bit = (ch % 2 == 0) ? 0x01u : 0x02u;
+            int mute_val = 0;
+            int mute_ret = esp_codec_dev_read_reg(record_dev, mute_reg, &mute_val);
+            if (mute_ret == ESP_CODEC_DEV_OK) {
+                int cleared_val = mute_val & ~mute_bit;
+                if (cleared_val != mute_val) {
+                    mute_ret = esp_codec_dev_write_reg(record_dev, mute_reg, cleared_val);
+                    if (mute_ret != ESP_CODEC_DEV_OK) {
+                        ESP_LOGW(TAG, "Failed to clear mute bit for CH%d (reg=0x%02X, ret=%d)",
+                                 ch + 1, mute_reg, mute_ret);
+                    } else {
+                        ESP_LOGD(TAG, "Cleared mute bit for CH%d (reg 0x%02X: 0x%02X -> 0x%02X)",
+                                 ch + 1, mute_reg, mute_val, cleared_val);
+                    }
+                }
+            } else {
+                ESP_LOGW(TAG, "Failed to read mute reg 0x%02X for CH%d (ret=%d)",
+                         mute_reg, ch + 1, mute_ret);
+            }
+            
+            ESP_LOGD(TAG, "CH%d gain set to %.1fdB (reg=0x%02X, old=0x%02X, new=0x%02X, gain_bits=%d)", 
+                     ch + 1, actual_gain_db, gain_regs[ch], current_val, new_val, gain_reg_value);
+        }
+    }
+
+    ESP_LOGI(TAG, "Set gain %.1fdB for channels 0x%02X (%s) successfully",
+             actual_gain_db, mic_channels_to_set, get_mic_channels_description(mic_channels_to_set));
     return ESP_OK;
 }
 
@@ -1713,7 +3079,8 @@ esp_err_t audio_es_tools::record_to_file(const char* filepath, uint32_t record_d
         return ESP_ERR_INVALID_ARG;
     }
 
-    uint32_t channels = (audio_channels == AUDIO_CHANNELS_MONO) ? 1u : 2u;
+    // 使用录音设备的声道配置
+    uint32_t channels = (rx_channels == AUDIO_CHANNELS_MONO) ? 1u : 2u;
     uint32_t bits = static_cast<uint32_t>(bits_per_sample);
     uint32_t sample_rate_hz = static_cast<uint32_t>(sample_rate);
     uint32_t bytes_per_sample = (bits * channels) / 8;

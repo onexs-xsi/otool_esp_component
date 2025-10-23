@@ -111,8 +111,16 @@ def generate_sine_wave_pcm(bits_per_sample=16, channel=1, sample_rate=44100, dur
             dur_str = str(int(duration))
         else:
             dur_str = f"{duration:.1f}".rstrip('0').rstrip('.')
+        
+        # 格式化采样率 (转换为 k 单位)
+        if sample_rate >= 1000 and sample_rate % 1000 == 0:
+            rate_str = f"{sample_rate // 1000}k"
+        elif sample_rate >= 1000:
+            rate_str = f"{sample_rate / 1000:.1f}k"
+        else:
+            rate_str = f"{sample_rate}"
             
-        output_filename = f"sine_{freq_str}Hz_{dur_str}s_{sample_rate}Hz_{bits_per_sample}bit_{channel}ch.pcm"
+        output_filename = f"sine_{freq_str}Hz_pcm_{channel}ch_{rate_str}_{bits_per_sample}bit_{dur_str}s.pcm"
     
     # 计算总采样数
     total_samples = int(sample_rate * duration * channel)
@@ -185,7 +193,16 @@ def generate_variable_frequency_sine(bits_per_sample=16, channel=1, sample_rate=
         start_str = str(int(freq_start)) if freq_start == int(freq_start) else f"{freq_start:.2f}".rstrip('0').rstrip('.')
         end_str = str(int(freq_end)) if freq_end == int(freq_end) else f"{freq_end:.2f}".rstrip('0').rstrip('.')
         dur_str = str(int(duration)) if duration == int(duration) else f"{duration:.1f}".rstrip('0').rstrip('.')
-        output_filename = f"sine_sweep_{start_str}-{end_str}Hz_{dur_str}s_{sample_rate}Hz_{bits_per_sample}bit_{channel}ch.pcm"
+        
+        # 格式化采样率 (转换为 k 单位)
+        if sample_rate >= 1000 and sample_rate % 1000 == 0:
+            rate_str = f"{sample_rate // 1000}k"
+        elif sample_rate >= 1000:
+            rate_str = f"{sample_rate / 1000:.1f}k"
+        else:
+            rate_str = f"{sample_rate}"
+            
+        output_filename = f"sine_sweep_{start_str}-{end_str}Hz_pcm_{channel}ch_{rate_str}_{bits_per_sample}bit_{dur_str}s.pcm"
     
     total_samples = int(sample_rate * duration)
     t = np.linspace(0, duration, total_samples, endpoint=False)

@@ -27,15 +27,18 @@ static inline void _gpio_set_high_z(gpio_num_t pin)
     gpio_pulldown_dis(pin);
 }
 
-esp_err_t audio_es_tools::es8311_init()
+esp_err_t audio_es_tools::es8311_init(audio_channels_t channels)
 {
     if (es8311_initialized) {
         ESP_LOGW(TAG, "ES8311 already initialized");
         return ESP_OK;
     }
 
+    // 保存TX声道配置
+    this->tx_channels = channels;
+
     ESP_LOGI(TAG, "Initializing ES8311 (DAC/Playback) with %s...", 
-             (audio_channels == AUDIO_CHANNELS_MONO) ? "MONO" : "STEREO");
+             (channels == AUDIO_CHANNELS_MONO) ? "MONO" : "STEREO");
     
     esp_err_t ret = ESP_OK;
     
@@ -68,16 +71,12 @@ esp_err_t audio_es_tools::es8311_init()
     ESP_LOGI(TAG, "Creating ES8311 codec device...");
 
     
-    // 1. 创建 I2S 数据接口
-    audio_codec_i2s_cfg_t i2s_cfg = {};
-    i2s_cfg.tx_handle = tx_handle;
-    i2s_cfg.rx_handle = rx_handle;
-    
-    const audio_codec_data_if_t *data_if = audio_codec_new_i2s_data(&i2s_cfg);
-    if (!data_if) {
-        ESP_LOGE(TAG, "Failed to create I2S data interface");
-        return ESP_FAIL;
+    // 1. 使用共享 I2S 数据接口(避免 mode conflict)
+    if (!shared_i2s_data_if) {
+        ESP_LOGE(TAG, "Shared I2S data interface not initialized");
+        return ESP_ERR_INVALID_STATE;
     }
+    const audio_codec_data_if_t *data_if = shared_i2s_data_if;
 
     // 2. 创建 I2C 控制接口
     audio_codec_i2c_cfg_t i2c_cfg = {};
@@ -87,7 +86,7 @@ esp_err_t audio_es_tools::es8311_init()
     const audio_codec_ctrl_if_t *ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
     if (!ctrl_if) {
         ESP_LOGE(TAG, "Failed to create I2C control interface");
-        audio_codec_delete_data_if(data_if);
+        // 不要删除共享接口
         return ESP_FAIL;
     }
     
@@ -97,7 +96,7 @@ esp_err_t audio_es_tools::es8311_init()
     if (!gpio_if) {
         ESP_LOGE(TAG, "Failed to create GPIO interface");
         audio_codec_delete_ctrl_if(ctrl_if);
-        audio_codec_delete_data_if(data_if);
+        // 不要删除共享接口
         return ESP_FAIL;
     }
     
@@ -115,7 +114,7 @@ esp_err_t audio_es_tools::es8311_init()
         ESP_LOGE(TAG, "Failed to create ES8311 codec interface");
         audio_codec_delete_gpio_if(gpio_if);
         audio_codec_delete_ctrl_if(ctrl_if);
-        audio_codec_delete_data_if(data_if);
+        // 不要删除共享接口
         return ESP_FAIL;
     }
     
@@ -131,7 +130,7 @@ esp_err_t audio_es_tools::es8311_init()
         audio_codec_delete_codec_if(codec_if);
         audio_codec_delete_gpio_if(gpio_if);
         audio_codec_delete_ctrl_if(ctrl_if);
-        audio_codec_delete_data_if(data_if);
+        // 不要删除共享接口
         return ESP_FAIL;
     }
 
@@ -144,14 +143,14 @@ esp_err_t audio_es_tools::es8311_init()
         audio_codec_delete_codec_if(codec_if);
         audio_codec_delete_gpio_if(gpio_if);
         audio_codec_delete_ctrl_if(ctrl_if);
-        audio_codec_delete_data_if(data_if);
+        // 不要删除共享接口
         return ret;
     }
     
     // 7. 打开播放设备
     esp_codec_dev_sample_info_t fs = {};
     fs.sample_rate = (uint32_t)sample_rate;
-    fs.channel = (uint32_t)audio_channels;  // 使用系统配置的声道数
+    fs.channel = (uint32_t)channels;  // 使用传入的声道参数
     fs.bits_per_sample = (uint32_t)bits_per_sample;
     
     ret = esp_codec_dev_open(play_dev, &fs);
@@ -162,7 +161,7 @@ esp_err_t audio_es_tools::es8311_init()
         audio_codec_delete_codec_if(codec_if);
         audio_codec_delete_gpio_if(gpio_if);
         audio_codec_delete_ctrl_if(ctrl_if);
-        audio_codec_delete_data_if(data_if);
+        // 不要删除共享接口
         return ret;
     }
     

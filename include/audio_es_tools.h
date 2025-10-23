@@ -9,18 +9,25 @@
 
 //es8311 and es7210 include
 #include "driver/i2s_std.h"
-// #include "driver/i2s_tdm.h"
+#include "driver/i2s_tdm.h"
 #include "soc/soc_caps.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
 #include "esp_log.h"
+#include "i2c_bus.h"
 #include "esp_err.h"
+#include "esp_timer.h"
+#include "esp_heap_caps.h"
+#include <math.h>
+#include <string.h>
+#include <stdint.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
-#include "i2c_bus.h"
+// ESP-SR AEC support
+#include "esp_afe_aec.h"
 
 // I2S PIN MAP
 #define I2S_BCLK_PIN       GPIO_NUM_40
@@ -46,12 +53,14 @@
  * 定义可播放的音频文件类型
  */
 typedef enum {
-    AUDIO_FILE_TEST_A = 0,    ///< 测试音频文件A (test_a.pcm)
-    AUDIO_FILE_TEST_B,        ///< 测试音频文件B (test_b.pcm)
-    AUDIO_FILE_STARTUP_1CH,   ///< 启动音频文件 (startup_1ch.pcm)
-    AUDIO_FILE_SINE_440HZ,    ///< 440Hz正弦波音频文件 (sine_440Hz_30s_44100Hz_16bit_1ch.pcm)
-    AUDIO_FILE_AUTO,          ///< 自动选择可用的音频文件
-    AUDIO_FILE_MAX            ///< 枚举最大值（用于边界检查）
+    AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S = 0,  ///< Candy Wind 1通道 16kHz 16bit 9秒音频文件 (candy_wind_pcm_1ch_16k_16bit_9s.pcm)
+    AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S,     ///< Candy Wind 1通道 44.1kHz 16bit 45.5秒音频文件 (candy_wind_pcm_1ch_44.1k_16bit_45.5s.pcm)
+    AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S,      ///< Candy Wind 2通道 16kHz 16bit 9秒音频文件 (candy_wind_pcm_2ch_16k_16bit_9s.pcm)
+    AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S,     ///< Candy Wind 2通道 44.1kHz 16bit 45.5秒音频文件 (candy_wind_pcm_2ch_44.1k_16bit_45.5s.pcm)
+    AUDIO_FILE_STARTUP_1CH_16K_16B_4S,         ///< 启动音频文件 1通道 16kHz 16bit 4秒 (startup_pcm_1ch_16k_16bit_4s.pcm)
+    AUDIO_FILE_STARTUP_2CH_16K_16B_4S,         ///< 启动音频文件 2通道 16kHz 16bit 4秒 (startup_pcm_2ch_16k_16bit_4s.pcm)
+    AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S,     ///< 440Hz正弦波音频文件 2通道 16kHz 16bit 10秒 (sine_440Hz_pcm_2ch_16k_16bit_10s.pcm)
+    AUDIO_FILE_MAX                             ///< 枚举最大值（用于边界检查）
 } audio_file_type_t;
 
 /**
@@ -71,7 +80,9 @@ typedef enum {
  */
 typedef enum {
     AUDIO_CHANNELS_MONO = 1,     ///< 单声道
-    AUDIO_CHANNELS_STEREO = 2    ///< 立体声
+    AUDIO_CHANNELS_STEREO = 2,   ///< 立体声
+    AUDIO_CHANNELS_3CHs = 3,      ///< 3声道
+    AUDIO_CHANNELS_4CHs = 4       ///< 4声道
 } audio_channels_t;
 
 /**
@@ -91,17 +102,6 @@ typedef enum {
     AUDIO_SAMPLE_RATE_176K4 = 176400, ///< 176.4kHz - 超高保真
     AUDIO_SAMPLE_RATE_192K = 192000   ///< 192kHz - 超高保真专业
 } audio_sample_rate_t;
-
-/**
- * @brief 音频位深度枚举
- * 
- * 定义音频位深度配置
- */
-typedef enum {
-    AUDIO_BITS_16 = 16,    ///< 16位 - 标准质量
-    AUDIO_BITS_24 = 24,    ///< 24位 - 高质量
-    AUDIO_BITS_32 = 32     ///< 32位 - 专业质量
-} audio_bits_per_sample_t;
 
 /**
  * @brief ES7210麦克风通道选择枚举
@@ -127,6 +127,64 @@ typedef enum {
     AUDIO_MIC_CHANNEL_234 = 0x0E,             ///< 麦克风通道2+3+4
     AUDIO_MIC_CHANNEL_ALL = 0x0F              ///< 所有麦克风通道1+2+3+4
 } audio_mic_channel_t;
+
+/**
+ * @brief 录音缓冲拆分结果
+ *
+ * 为最多4路麦克风通道提供独立的样本缓冲和基础元数据。
+ * status 非 ESP_OK 时，其余字段可能为空，应先检查再使用。
+ */
+typedef struct {
+    esp_err_t status;                          ///< 拆分操作结果
+    size_t samples_per_channel;                ///< 每个通道的样本数
+    size_t bytes_per_sample;                   ///< 原始I2S样本的字节数
+    bool is_tdm_mode;                          ///< 是否基于TDM模式拆分
+    audio_mic_channel_t enabled_mask;          ///< 参与拆分的麦克风掩码
+    int16_t* mic_buffers[4];                   ///< 各通道指向16bit单声道缓冲的指针（未启用时为nullptr）
+} channel_split_result_t;
+
+typedef struct {
+    bool available;                            ///< 通道是否有有效缓冲
+    size_t sample_count;                       ///< 通道样本数量
+    int16_t min_value;                         ///< 通道最小采样值
+    int16_t max_value;                         ///< 通道最大采样值
+    int32_t average_abs_amplitude;             ///< 平均绝对幅度
+    double rms_db;                             ///< RMS 电平 (dB)
+    double zero_percent;                       ///< 零值占比 (%)
+    double clipped_percent;                    ///< 剪裁占比 (%)
+} mic_channel_quality_t;
+
+/**
+ * @brief ES7210 TDM 模式控制
+ */
+typedef enum {
+    ES7210_TDM_DISABLED = 0,  ///< 禁用TDM，使用标准I2S
+    ES7210_TDM_ENABLED = 1    ///< 启用TDM，固定4通道slot
+} es7210_tdm_mode_t;
+
+/**
+ * @brief ES7210麦克风增益枚举
+ * 
+ * 定义ES7210 ADC支持的增益档位
+ * 寄存器值直接对应档位序号(0-14)
+ */
+typedef enum {
+    ES7210_MIC_GAIN_0DB = 0,        ///< 0dB (寄存器值=0)
+    ES7210_MIC_GAIN_3DB = 1,        ///< 3dB (寄存器值=1)
+    ES7210_MIC_GAIN_6DB = 2,        ///< 6dB (寄存器值=2)
+    ES7210_MIC_GAIN_9DB = 3,        ///< 9dB (寄存器值=3)
+    ES7210_MIC_GAIN_12DB = 4,       ///< 12dB (寄存器值=4)
+    ES7210_MIC_GAIN_15DB = 5,       ///< 15dB (寄存器值=5)
+    ES7210_MIC_GAIN_18DB = 6,       ///< 18dB (寄存器值=6)
+    ES7210_MIC_GAIN_21DB = 7,       ///< 21dB (寄存器值=7)
+    ES7210_MIC_GAIN_24DB = 8,       ///< 24dB (寄存器值=8)
+    ES7210_MIC_GAIN_27DB = 9,       ///< 27dB (寄存器值=9)
+    ES7210_MIC_GAIN_30DB = 10,      ///< 30dB (寄存器值=10, 常用值)
+    ES7210_MIC_GAIN_33DB = 11,      ///< 33dB (寄存器值=11)
+    ES7210_MIC_GAIN_34_5DB = 12,    ///< 34.5dB (寄存器值=12)
+    ES7210_MIC_GAIN_36DB = 13,      ///< 36dB (寄存器值=13)
+    ES7210_MIC_GAIN_37_5DB = 14     ///< 37.5dB (寄存器值=14, 最大增益)
+} es7210_mic_gain_t;
 
 /**
  * @brief audio_es_tools 类
@@ -172,6 +230,7 @@ private:
     int i2s_user_count = 0;                 ///< 使用 I2S 的编解码器数量
     bool tx_configured = false;             ///< TX 通道已完成模式配置并 enable
     bool rx_configured = false;             ///< RX 通道已完成模式配置并 enable
+    uint8_t rx_tdm_slot_count = 0;          ///< RX TDM 启用的槽位数量
     bool i2s_cross_data_pins = true;        ///< 是否使用交叉数据引脚映射（硬件走线导致）
     bool pins_high_z_on_sleep = false;      ///< 进入睡眠时是否将 I2S 与 PA 引脚置为高阻
     bool suppress_release = false;          ///< 在系统整体去初始化期间暂缓 I2S 释放
@@ -180,9 +239,10 @@ private:
     
     // I2S 通道配置参数
     i2s_port_t i2s_port_num = I2S_NUM_0;                        ///< I2S通道编号
-    audio_channels_t audio_channels = AUDIO_CHANNELS_MONO;      ///< 音频声道数量
-    audio_sample_rate_t sample_rate = AUDIO_SAMPLE_RATE_44K1;   ///< 采样率
-    audio_bits_per_sample_t bits_per_sample = AUDIO_BITS_16;    ///< 位深度
+    audio_channels_t tx_channels = AUDIO_CHANNELS_MONO;         ///< TX（播放）声道数量
+    audio_channels_t rx_channels = AUDIO_CHANNELS_MONO;         ///< RX（录音）声道数量
+    audio_sample_rate_t sample_rate = AUDIO_SAMPLE_RATE_16K;   ///< 采样率（TX和RX共享）
+    i2s_data_bit_width_t bits_per_sample = I2S_DATA_BIT_WIDTH_16BIT;    ///< 位深度（TX和RX共享）
     
     // 音频响度配置
     float volume = 80.0;                    ///< 播放音量 (0.0 - 100.0)
@@ -190,10 +250,26 @@ private:
     
     // ES7210 麦克风通道配置
     audio_mic_channel_t mic_channels = AUDIO_MIC_CHANNEL_1;   ///< 默认使用麦克风通道1
+    bool es7210_use_tdm = false;                               ///< ES7210 是否使用 TDM 模式
+
+    // 共享 I2S 数据接口
+    const audio_codec_data_if_t *shared_i2s_data_if = nullptr; ///< 共享的 I2S 数据接口（避免重复创建）
 
     struct playback_task_args {
         audio_es_tools* instance;
         audio_file_type_t audio_type;
+        float duration_limit_seconds;
+    };
+
+    struct buffer_playback_task_args {
+        audio_es_tools* instance;
+        const uint8_t* buffer;
+        size_t buffer_size;
+        uint32_t buffer_sample_rate_hz;
+        audio_channels_t buffer_channels;
+        i2s_data_bit_width_t buffer_bits;
+        float duration_limit_seconds;
+        bool own_buffer;  ///< 是否需要在任务中释放buffer内存
     };
 
     // 内部辅助函数
@@ -201,8 +277,37 @@ private:
     void try_release_i2s();                 ///< 在引用计数为 0 时释放 I2S 通道
     void incr_i2s_user();                   ///< 增加 I2S 使用者计数
     void decr_i2s_user();                   ///< 减少 I2S 使用者计数
-    esp_err_t play_audio_file_impl(audio_file_type_t audio_type, bool check_stop_signal); ///< 内部播放实现
+    esp_err_t play_audio_file_impl(audio_file_type_t audio_type, bool check_stop_signal, float duration_limit_seconds); ///< 内部播放实现
+    esp_err_t play_audio_buffer_impl(const uint8_t* buffer, size_t buffer_size, 
+                                      uint32_t buffer_sample_rate_hz, audio_channels_t buffer_channels, 
+                                      i2s_data_bit_width_t buffer_bits, 
+                                      bool check_stop_signal, float duration_limit_seconds); ///< 内部缓冲区播放实现
     static void playback_task_entry(void* param);                ///< 异步播放任务入口
+    static void buffer_playback_task_entry(void* param);         ///< 异步缓冲区播放任务入口
+    static void free_channel_split_result(channel_split_result_t& result); ///< 释放拆分结果中的缓冲区
+    static channel_split_result_t split_recorded_channels(const uint8_t* record_buffer,
+                                                          size_t bytes_read,
+                                                          const esp_codec_dev_sample_info_t& fs,
+                                                          bool is_tdm_mode,
+                                                          audio_mic_channel_t mic_channels); ///< 拆分录音缓冲为独立通道
+    
+    /**
+     * @brief 获取指定音频文件的PCM数据和格式参数
+     * 
+     * @param audio_type 音频文件类型
+     * @param pcm_start 输出：PCM数据起始指针
+     * @param pcm_len 输出：PCM数据长度
+     * @param file_sample_rate_hz 输出：文件采样率
+     * @param file_channels 输出：文件声道数
+     * @param file_bits 输出：文件位深
+     * @return esp_err_t 返回操作结果
+     */
+    esp_err_t get_pcm_data_and_format(audio_file_type_t audio_type,
+                                       const uint8_t*& pcm_start,
+                                       size_t& pcm_len,
+                                       uint32_t& file_sample_rate_hz,
+                                       audio_channels_t& file_channels,
+                                       i2s_data_bit_width_t& file_bits);
 
 public:
     /**
@@ -235,10 +340,10 @@ public:
     /**
      * @brief 初始化ES8311音频芯片（DAC播放）
      * 
-     * 使用audio_system_init中配置的声道数量
+     * @param channels 音频声道配置（单声道或立体声）
      * @return esp_err_t 返回操作结果
      */
-    esp_err_t es8311_init();
+    esp_err_t es8311_init(audio_channels_t channels);
 
     /**
      * @brief 去初始化ES8311音频芯片
@@ -292,11 +397,14 @@ public:
     /**
      * @brief 初始化ES7210音频芯片（ADC录音）
      * 
-     * 使用audio_system_init中配置的声道数量
-     * @param mic_channels 麦克风通道选择
+    * @param channels 音频声道配置（单声道/立体声/TDM）
+    * @param mic_channels 麦克风通道选择
+    * @param use_tdm 是否启用TDM模式（显式指定，启用后强制使用4个slot）
      * @return esp_err_t 返回操作结果
      */
-    esp_err_t es7210_init(audio_mic_channel_t mic_channels);
+    esp_err_t es7210_init(audio_channels_t channels,
+                          audio_mic_channel_t mic_channels,
+                     es7210_tdm_mode_t use_tdm = ES7210_TDM_DISABLED);
 
     /**
      * @brief 去初始化ES7210音频芯片
@@ -306,16 +414,76 @@ public:
     esp_err_t es7210_deinit();
 
     /**
+     * @brief 设置ES7210指定通道的静音状态
+     * 
+     * 通过寄存器 0x14(ADC3/ADC4) 和 0x15(ADC1/ADC2) 精确控制每个麦克风通道的静音状态。
+     * 与增益控制(0x43-0x46)和通道启用(bit[4])独立工作，允许在不断电的情况下静音通道。
+     * 
+     * 寄存器映射：
+     * - 0x15[0] = ADC1 (MIC1) 静音控制
+     * - 0x15[1] = ADC2 (MIC2) 静音控制  
+     * - 0x14[0] = ADC3 (MIC3) 静音控制
+     * - 0x14[1] = ADC4 (MIC4) 静音控制
+     * 
+     * 应用场景：
+     * - 标准I²S模式下MIC2独占使用（需要启用MIC1但静音）
+     * - TDM模式下动态启用/禁用特定麦克风
+     * - 多麦克风阵列中的选择性静音
+     * - 快速响应的静音控制（无需断电重配置）
+     * 
+     * @param mic_channel 麦克风通道（仅支持单一通道）
+     *                    - AUDIO_MIC_CHANNEL_1: MIC1
+     *                    - AUDIO_MIC_CHANNEL_2: MIC2
+     *                    - AUDIO_MIC_CHANNEL_3: MIC3
+     *                    - AUDIO_MIC_CHANNEL_4: MIC4
+     * @param mute 静音状态
+     *             - true: 静音该通道（寄存器相应位置1）
+     *             - false: 取消静音（寄存器相应位清零）
+     * 
+     * @return esp_err_t 返回操作结果
+     *         - ESP_OK: 操作成功
+     *         - ESP_ERR_INVALID_STATE: ES7210未初始化
+     *         - ESP_ERR_INVALID_ARG: mic_channel不是单一通道或无效
+     *         - ESP_FAIL: 寄存器读写失败
+     * 
+     * @note 此函数仅控制静音，不影响通道的电源状态和增益设置
+     * @note 如果寄存器值未改变，函数会提前返回以优化性能
+     * @note 在TDM模式下，建议所有通道都保持取消静音状态（硬件自动管理slot）
+     * 
+     * @example
+     * ```cpp
+     * // 场景1：MIC2独占模式（标准I²S）
+     * es7210_init(AUDIO_CHANNELS_STEREO, AUDIO_MIC_CHANNEL_2, ES7210_TDM_DISABLED);
+     * es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_1, true);   // 静音MIC1（伴侣通道）
+     * es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_2, false);  // 确保MIC2正常
+     * 
+     * // 场景2：TDM模式下动态选择麦克风
+     * es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_3, true);   // 临时禁用MIC3
+     * // ... 录音 ...
+     * es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_3, false);  // 重新启用MIC3
+     * 
+     * // 场景3：批量静音所有通道
+     * es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_1, true);
+     * es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_2, true);
+     * es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_3, true);
+     * es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_4, true);
+     * ```
+     */
+    esp_err_t es7210_set_mic_channel_mute(audio_mic_channel_t mic_channel, bool mute);
+
+    /**
      * @brief 初始化音频系统（包含所有已配置的音频模块）
      * 
      * @param i2c_bus_handle I2C总线句柄
      * @param i2s_port_num I2S通道编号
-     * @param channels 音频声道数量
-     * @param sample_rate 采样率
-     * @param bits_per_sample 位深度
+     * @param sample_rate 采样率（播放和录音共享，因为共享I2S时钟）
+     * @param bits_per_sample 位深度（播放和录音共享，因为共享I2S时钟）
      * @return esp_err_t 返回操作结果
+     * 
+     * @note 采样率和位深度必须在播放和录音之间保持一致，因为它们共享同一个I2S总线
+     * @note 声道配置在各自的 es8311_init() 和 es7210_init() 中独立设置
      */
-    esp_err_t audio_system_init(i2c_master_bus_handle_t i2c_bus_handle, i2s_port_t i2s_port_num, audio_channels_t channels, audio_sample_rate_t sample_rate, audio_bits_per_sample_t bits_per_sample);
+    esp_err_t audio_system_init(i2c_master_bus_handle_t i2c_bus_handle, i2s_port_t i2s_port_num, audio_sample_rate_t sample_rate, i2s_data_bit_width_t bits_per_sample);
 
     /**
      * @brief 去初始化音频系统
@@ -323,13 +491,6 @@ public:
      * @return esp_err_t 返回操作结果
      */
     esp_err_t audio_system_deinit();
-
-    /**
-     * @brief 播放和录音测试
-     * 
-     * @return esp_err_t 返回操作结果
-     */
-    esp_err_t play_and_record_test();
 
     /**
      * @brief 使ES8311进入睡眠模式
@@ -353,19 +514,104 @@ public:
     esp_err_t audio_system_sleep();
 
     /**
-     * @brief 播放音乐测试
-     * 
-     * @return esp_err_t 返回操作结果
-     */
-    esp_err_t play_music_test();
-
-    /**
      * @brief 录音测试
      * 
      * @param record_duration_ms 录音时长（毫秒）
      * @return esp_err_t 返回操作结果
      */
     esp_err_t record_test(uint32_t record_duration_ms = 3000);
+
+    /**
+     * @brief 单次录音并播放测试
+     * 
+     * 此函数执行简单的录音-播放测试流程：
+     * 1. 录制指定时长的音频
+     * 2. 分析录制的音频数据（RMS、峰值等）
+     * 3. 播放刚录制的音频
+     * 
+     * 适用场景：
+     * - 快速验证麦克风和扬声器功能
+     * - 测试音频采集和播放质量
+     * - 检查录音延迟和音质
+     * 
+     * @param record_duration_seconds 录音时长（秒），默认3秒
+     * @return esp_err_t 返回操作结果
+     *         - ESP_OK: 测试成功
+     *         - ESP_ERR_INVALID_STATE: 音频设备未初始化
+     *         - ESP_ERR_NO_MEM: 内存分配失败
+     * 
+     * @note 录音和播放之间会有500ms的间隔
+     * @note 播放结束后会自动清空播放管线
+     * 
+     * @example
+     * ```cpp
+     * // 录音3秒并播放
+     * audio_es_tools::record_and_play_test(3);
+     * 
+     * // 录音5秒并播放
+     * audio_es_tools::record_and_play_test(5);
+     * ```
+     */
+    esp_err_t record_and_play_test(uint32_t record_duration_seconds = 3);
+
+    /**
+     * @brief 单次录音并播放测试（支持TDM通道选择）
+     * 
+     * 此函数在TDM模式下录制多个麦克风的数据，然后只播放指定麦克风的音频。
+     * 
+     * 工作流程：
+     * 1. 录制完整的TDM多通道音频数据
+     * 2. 从录制的数据中提取指定麦克风通道
+     * 3. 分析提取的音频数据质量
+     * 4. 播放提取的单通道音频（可选，支持"干运行"模式）
+     * 
+     * 适用场景：
+     * - TDM模式下测试特定麦克风（如AUDIO_MIC_CHANNEL_123时测试MIC3）
+     * - 多麦克风阵列中单独验证每个麦克风
+     * - 麦克风性能对比测试
+     * - 快速分析音频质量而不播放（analysis_only=true）
+     * 
+     * @param record_duration_seconds 录音时长（秒），默认3秒
+     * @param target_mic_channel 目标麦克风通道（使用 audio_mic_channel_t 枚举值）
+     *                          - AUDIO_MIC_CHANNEL_1: MIC1
+     *                          - AUDIO_MIC_CHANNEL_2: MIC2
+     *                          - AUDIO_MIC_CHANNEL_3: MIC3
+     *                          - AUDIO_MIC_CHANNEL_4: MIC4
+     * @param analysis_only 仅分析模式（默认false=播放音频）
+     *                      - false: 正常模式，录音→提取→分析→播放
+     *                      - true: 干运行模式，录音→提取→分析（跳过播放）
+     * @return esp_err_t 返回操作结果
+     *         - ESP_OK: 测试成功
+     *         - ESP_ERR_INVALID_STATE: 音频设备未初始化或非TDM模式
+     *         - ESP_ERR_INVALID_ARG: 目标通道无效或未启用
+     *         - ESP_ERR_NO_MEM: 内存分配失败
+     * 
+     * @note 仅在TDM模式（3个或以上麦克风）下有效
+     * @note 在STEREO+TDM模式下，数据格式为8位采样
+     * @note 提取的通道会被转换为16位并扩展为立体声
+     * @note target_mic_channel必须是单一麦克风通道，不能是组合通道（如AUDIO_MIC_CHANNEL_12）
+     * @note analysis_only=true时不需要初始化ES8311播放设备
+     * 
+     * @example
+     * ```cpp
+    * // 初始化为TDM模式（3个麦克风）
+    * es7210_init(AUDIO_CHANNELS_3CHs, AUDIO_MIC_CHANNEL_123, ES7210_TDM_ENABLED);
+     * 
+     * // 正常模式：录音5秒并播放MIC3的音频
+     * record_and_play_test_with_channel_select(5, AUDIO_MIC_CHANNEL_3, false);
+     * 
+     * // 仅分析模式：录音5秒，分析MIC2数据，不播放（快速测试）
+     * record_and_play_test_with_channel_select(5, AUDIO_MIC_CHANNEL_2, true);
+     * 
+     * // 批量测试所有麦克风质量（无需播放）
+     * for (auto mic : {AUDIO_MIC_CHANNEL_1, AUDIO_MIC_CHANNEL_2, AUDIO_MIC_CHANNEL_3}) {
+     *     record_and_play_test_with_channel_select(3, mic, true);
+     * }
+     * ```
+     */
+    esp_err_t record_and_play_test_with_channel_select(uint32_t record_duration_seconds = 3, 
+                                                        audio_mic_channel_t target_mic_channel = AUDIO_MIC_CHANNEL_1,
+                                                        bool analysis_only = false);
 
     /**
      * @brief 录音并播放录音内容测试
@@ -378,6 +624,81 @@ public:
      * @return esp_err_t 返回操作结果
      */
     esp_err_t record_and_playback_test(uint32_t record_duration_seconds = 5, bool loop_playback = false);
+
+    /**
+     * @brief 计算拆分后四个通道的质量指标
+     *
+     * @param split_result split_recorded_channels 的输出结构体
+     * @param quality 输出：4个通道对应的质量指标数组
+     */
+    static void compute_split_channel_quality(const channel_split_result_t& split_result,
+                                              mic_channel_quality_t quality[4]);
+
+    /**
+     * @brief AEC（回声消除）测试函数
+     * 
+     * 此函数实现了完整的AEC测试流程：
+     * 1. 同时录制麦克风输入和参考音频（正在播放的音频）
+     * 2. 使用ESP-SR的AEC算法进行回声消除处理
+     * 3. 播放经过AEC处理后的音频，并与原始录音对比
+     * 
+     * 测试场景：在播放音乐的同时说话，AEC会消除播放的音乐回声，只保留说话声音
+     * 
+     * @param record_duration_seconds 录音时长（秒），默认5秒
+     * @param filter_length AEC滤波器长度，推荐值：ESP32P4=4, ESP32C5=2
+     *                      值越大CPU负载越高但回声消除效果越好
+     * @param aec_mode AEC工作模式：
+     *                 - AFE_MODE_LOW_COST: 低功耗模式（适合电池供电设备）
+     *                 - AFE_MODE_HIGH_PERF: 高性能模式（更好的回声消除效果）
+     * @param play_original_audio 是否播放原始录音：
+     *                            - true: 播放原始录音（用于对比效果）
+     *                            - false: 播放AEC处理后的音频
+     * 
+     * @return esp_err_t 返回操作结果
+     *         - ESP_OK: 测试成功
+     *         - ESP_ERR_INVALID_STATE: 音频系统未初始化
+     *         - ESP_ERR_NO_MEM: 内存分配失败
+     *         - 其他: 底层驱动错误
+     * 
+     * @note 使用前确保已调用：
+     *       - audio_system_init()
+     *       - es8311_init()
+     *       - es7210_init()
+     */
+    esp_err_t aec_test(uint32_t record_duration_seconds = 5, int filter_length = 4, 
+                       afe_mode_t aec_mode = AFE_MODE_LOW_COST, bool play_original_audio = false);
+
+    /**
+     * @brief 测试AEC硬件回采功能
+     * 
+     * 此函数用于验证ES7210的硬件AEC回采是否正常工作。
+     * 功能：
+     * - 同时读取CH1(麦克风)和CH3(回采)
+     * - 分析两个通道的音频数据特征（RMS、峰值、零值率等）
+     * - 可选择性播放各通道数据进行听觉验证
+     * - 提供详细诊断信息
+     * 
+     * @param record_duration_seconds 录音时长（秒），默认3秒
+     * @param play_channels 播放选项：0=不播放, 1=仅麦克风, 2=仅回采, 3=两者都播放
+     * @return esp_err_t 返回操作结果
+     *         - ESP_OK: 测试成功
+     *         - ESP_ERR_INVALID_STATE: 音频系统未初始化或未启用硬件AEC
+     *         - ESP_ERR_NO_MEM: 内存分配失败
+     * 
+     * @note 要求:
+     *       - ES7210必须使用AUDIO_MIC_CHANNEL_13初始化(CH1+CH3)
+     *       - audio_system_init必须配置为AUDIO_CHANNELS_STEREO
+     * 
+     * @example
+     * ```cpp
+     * // 录音并播放两个通道进行对比
+     * audio_es_tools::test_aec_loopback(3, 3);
+     * 
+     * // 仅录音和分析,不播放
+     * audio_es_tools::test_aec_loopback(5, 0);
+     * ```
+     */
+    esp_err_t test_aec_loopback(uint32_t record_duration_seconds = 3, uint8_t play_channels = 3);
 
     /**
      * @brief 将录音数据保存到指定文件
@@ -397,12 +718,37 @@ public:
 
     /**
      * @brief 播放指定类型的音频文件
-     * 
+     *
      * @param audio_type 要播放的音频文件类型
-    * @param wait_for_completion 为 true 时在当前线程阻塞直至播放完成；为 false 时创建独立任务异步播放
+     * @param mode 播放模式（阻塞或异步）
+     * @param duration_limit_seconds 播放时长限制（秒），0 表示播放完整文件
      * @return esp_err_t 返回操作结果
      */
-    esp_err_t play_audio_file(audio_file_type_t audio_type, audio_playback_mode_t mode = AUDIO_PLAYBACK_BLOCKING);
+    esp_err_t play_audio_file(audio_file_type_t audio_type, audio_playback_mode_t mode = AUDIO_PLAYBACK_BLOCKING, float duration_limit_seconds = 0.0f);
+
+    /**
+     * @brief 播放内存中的音频缓冲区，支持自适应格式转换
+     * 
+     * 该函数可以播放任意格式的PCM音频数据，并自动转换为系统配置的格式
+     * 
+     * @param buffer 音频数据缓冲区指针
+     * @param buffer_size 缓冲区大小（字节）
+     * @param buffer_sample_rate_hz 缓冲区音频采样率（Hz）
+     * @param buffer_channels 缓冲区声道配置
+     * @param buffer_bits 缓冲区位深配置
+     * @param mode 播放模式（阻塞或异步）
+     * @param duration_limit_seconds 播放时长限制（秒），0 表示播放完整缓冲区
+     * @return esp_err_t 返回操作结果
+     *         - ESP_OK: 播放成功
+     *         - ESP_ERR_INVALID_ARG: 参数无效
+     *         - ESP_ERR_INVALID_STATE: 播放设备未就绪或已有异步任务运行
+     *         - ESP_ERR_NO_MEM: 内存分配失败
+     */
+    esp_err_t play_audio_buffer(const uint8_t* buffer, size_t buffer_size, 
+                                 uint32_t buffer_sample_rate_hz, audio_channels_t buffer_channels, 
+                                 i2s_data_bit_width_t buffer_bits,
+                                 audio_playback_mode_t mode = AUDIO_PLAYBACK_BLOCKING, 
+                                 float duration_limit_seconds = 0.0f);
 
     /**
     * @brief 查询是否存在正在运行的异步播放任务
@@ -492,32 +838,53 @@ public:
                            gpio_num_t data_out_pin, gpio_num_t ws_pin, gpio_num_t pa_pin);
 
     /**
-     * @brief 检查PCM测试文件A是否可用
+     * @brief 检查PCM Candy Wind 1通道 16kHz文件是否可用
      * 
-     * @return bool 返回PCM测试文件A的可用状态
+     * @return bool 返回PCM文件的可用状态
      */
-    bool is_pcm_test_a_available() const;
+    bool is_pcm_candy_wind_1ch_16k_available() const;
 
     /**
-     * @brief 检查PCM测试文件B是否可用
+     * @brief 检查PCM Candy Wind 1通道 44.1kHz文件是否可用
      * 
-     * @return bool 返回PCM测试文件B的可用状态
+     * @return bool 返回PCM文件的可用状态
      */
-    bool is_pcm_test_b_available() const;
+    bool is_pcm_candy_wind_1ch_44k_available() const;
 
     /**
-     * @brief 检查PCM启动音频文件是否可用
+     * @brief 检查PCM Candy Wind 2通道 16kHz文件是否可用
+     * 
+     * @return bool 返回PCM文件的可用状态
+     */
+    bool is_pcm_candy_wind_2ch_16k_available() const;
+
+    /**
+     * @brief 检查PCM Candy Wind 2通道 44.1kHz文件是否可用
+     * 
+     * @return bool 返回PCM文件的可用状态
+     */
+    bool is_pcm_candy_wind_2ch_44k_available() const;
+
+    /**
+     * @brief 检查PCM启动音频文件 1通道 16kHz是否可用
      * 
      * @return bool 返回PCM启动音频文件的可用状态
      */
-    bool is_pcm_startup_1ch_available() const;
+    bool is_pcm_startup_1ch_16k_available() const;
+
+    /**
+     * @brief 检查PCM启动音频文件 2通道 16kHz是否可用
+     * 
+     * @return bool 返回PCM启动音频文件的可用状态
+     */
+    bool is_pcm_startup_2ch_16k_available() const;
 
     /**
      * @brief 检查PCM 440Hz正弦波文件是否可用
      * 
      * @return bool 返回PCM 440Hz正弦波文件的可用状态
      */
-    bool is_pcm_sine_440hz_available() const;
+    bool is_pcm_sine_440hz_2ch_16k_16b_10s_available() const;
 
     /**
      * @brief 获取可用PCM测试文件的数量
@@ -543,14 +910,6 @@ public:
     bool is_audio_file_available(audio_file_type_t audio_type) const;
 
     /**
-     * @brief 播放所有可用的音频文件
-     * 
-     * 遍历所有音频文件类型并依次播放可用的文件
-     * @return esp_err_t 返回操作结果
-     */
-    esp_err_t play_all_available_files() const;
-
-    /**
      * @brief 设置 I2C 总线句柄（在调用各 codec init 前必须设置）
      */
     void set_i2c_bus(i2c_master_bus_handle_t bus) { i2c_bus_handle = bus; }
@@ -568,20 +927,59 @@ public:
     bool get_pins_high_z_on_sleep() const { return pins_high_z_on_sleep; }
 
     /**
-     * @brief 设置音频声道数量
+     * @brief 设置TX（播放）声道数量
      * 
      * @param channels 声道数量
+     * @note 通常应该通过 es8311_init() 设置，而不是直接调用此函数
      */
-    void set_audio_channels(audio_channels_t channels) { 
-        audio_channels = channels; 
+    void set_tx_channels(audio_channels_t channels) { 
+        tx_channels = channels; 
     }
 
     /**
-     * @brief 获取当前音频声道数量
+     * @brief 获取当前TX（播放）声道数量
      * 
-     * @return audio_channels_t 当前声道数量
+     * @return audio_channels_t 当前TX声道数量
      */
-    audio_channels_t get_audio_channels() const { return audio_channels; }
+    audio_channels_t get_tx_channels() const { return tx_channels; }
+
+    /**
+     * @brief 设置RX（录音）声道数量
+     * 
+     * @param channels 声道数量
+     * @note 通常应该通过 es7210_init() 设置，而不是直接调用此函数
+     */
+    void set_rx_channels(audio_channels_t channels) { 
+        rx_channels = channels; 
+    }
+
+    /**
+     * @brief 获取当前RX（录音）声道数量
+     * 
+     * @return audio_channels_t 当前RX声道数量
+     */
+    audio_channels_t get_rx_channels() const { return rx_channels; }
+
+    /**
+     * @brief 设置音频声道数量（已废弃）
+     * 
+     * @deprecated 请使用 set_tx_channels() 和 set_rx_channels() 替代
+     * @param channels 声道数量
+     */
+    [[deprecated("Use set_tx_channels() and set_rx_channels() instead")]]
+    void set_audio_channels(audio_channels_t channels) { 
+        tx_channels = channels;
+        rx_channels = channels;
+    }
+
+    /**
+     * @brief 获取当前音频声道数量（已废弃）
+     * 
+     * @deprecated 请使用 get_tx_channels() 和 get_rx_channels() 替代
+     * @return audio_channels_t 返回TX声道数量（为了向后兼容）
+     */
+    [[deprecated("Use get_tx_channels() and get_rx_channels() instead")]]
+    audio_channels_t get_audio_channels() const { return tx_channels; }
 
     /**
      * @brief 设置I2S通道编号
@@ -618,16 +1016,16 @@ public:
      * 
      * @param bits 位深度
      */
-    void set_bits_per_sample(audio_bits_per_sample_t bits) { 
+    void set_bits_per_sample(i2s_data_bit_width_t bits) { 
         bits_per_sample = bits; 
     }
 
     /**
      * @brief 获取当前位深度
      * 
-     * @return audio_bits_per_sample_t 当前位深度
+     * @return i2s_data_bit_width_t 当前位深度
      */
-    audio_bits_per_sample_t get_bits_per_sample() const { return bits_per_sample; }
+    i2s_data_bit_width_t get_bits_per_sample() const { return bits_per_sample; }
 
     /**
      * @brief 设置播放音量
@@ -669,6 +1067,24 @@ public:
     esp_err_t set_audio_levels(float volume, float gain);
 
     /**
+     * @brief 设置ES7210指定麦克风通道的增益
+     * 
+     * @param mic_channels 要设置的麦克风通道 (audio_mic_channel_t)
+     * @param gain 增益值 (es7210_mic_gain_t)
+     * @return esp_err_t 返回操作结果
+     *         - ESP_OK: 设置成功
+     *         - ESP_ERR_INVALID_ARG: 参数无效
+     *         - ESP_ERR_INVALID_STATE: ES7210未初始化
+     * 
+     * @example
+     * ```cpp
+     * es7210_set_mic_channel_gain(AUDIO_MIC_CHANNEL_1, ES7210_MIC_GAIN_30DB);
+     * es7210_set_mic_channel_gain(AUDIO_MIC_CHANNEL_23, ES7210_MIC_GAIN_24DB);
+     * ```
+     */
+    esp_err_t es7210_set_mic_channel_gain(audio_mic_channel_t mic_channels, es7210_mic_gain_t gain);
+
+    /**
      * @brief 设置ES7210麦克风通道
      * 
      * @param channels 麦克风通道选择，可以组合使用多个通道
@@ -704,6 +1120,15 @@ public:
      * @return int 麦克风通道个数(0~4)
      */
     int count_selected_mics() const;
+
+    /**
+     * @brief 检查 ES7210 是否正在使用 TDM 模式
+     * 
+     * @return bool 返回 ES7210 的 TDM 模式状态
+     *         - true: ES7210 使用 TDM 模式（AUDIO_CHANNELS_3CHs 或 AUDIO_CHANNELS_4CHs）
+     *         - false: ES7210 使用标准模式（MONO 或 STEREO）
+     */
+    bool is_es7210_tdm_mode() const { return es7210_use_tdm; }
 
     // ========== 未来扩展接口示例 ==========
     // 为接入新的音频设备预留的接口框架
