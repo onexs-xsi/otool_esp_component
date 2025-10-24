@@ -508,6 +508,8 @@ audio_es_tools::audio_es_tools()
     ESP_LOGI(TAG, "audio_es_tools object created with default parameters");
     play_dev = NULL;
     record_dev = NULL;
+    es8311_dev_handle = NULL;
+    es8311_work_mode = ESP_CODEC_DEV_WORK_MODE_NONE;
     tx_handle = NULL;
     rx_handle = NULL;
     i2c_bus_handle = NULL;
@@ -554,6 +556,8 @@ audio_es_tools::audio_es_tools(gpio_num_t bck_pin, gpio_num_t mck_pin, gpio_num_
     ESP_LOGI(TAG, "audio_es_tools object created with custom parameters");
     play_dev = NULL;
     record_dev = NULL;
+    es8311_dev_handle = NULL;
+    es8311_work_mode = ESP_CODEC_DEV_WORK_MODE_NONE;
     tx_handle = NULL;
     rx_handle = NULL;
     i2c_bus_handle = NULL;
@@ -1029,8 +1033,11 @@ esp_err_t audio_es_tools::audio_system_sleep()
 
 esp_err_t audio_es_tools::record_test(uint32_t record_duration_ms)
 {
-    if (!es7210_initialized) {
-        ESP_LOGE(TAG, "ES7210 not initialized, cannot record");
+    const bool using_es8311_adc = es8311_initialized && es8311_has_adc_path() && (record_dev == es8311_dev_handle);
+    const bool using_es7210_adc = es7210_initialized && !using_es8311_adc;
+
+    if (!using_es8311_adc && !using_es7210_adc) {
+        ESP_LOGE(TAG, "No active recording codec available (ES8311/ES7210)");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1039,14 +1046,27 @@ esp_err_t audio_es_tools::record_test(uint32_t record_duration_ms)
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGI(TAG, "Starting %lu ms record test...", record_duration_ms);
+    ESP_LOGI(TAG, "Starting %lu ms record test using %s...",
+             record_duration_ms,
+             using_es8311_adc ? "ES8311 ADC" : "ES7210 ADC");
 
     // 分配录音缓冲区（动态参数）
     const size_t sr = (size_t)sample_rate;
     size_t channels = 0;
     uint8_t mic_mask = static_cast<uint8_t>(mic_channels);
-    for (int i = 0; i < 4; ++i) if (mic_mask & (1 << i)) channels++;
-    if (channels == 0) channels = 1;
+    if (using_es8311_adc) {
+        channels = (rx_channels == AUDIO_CHANNELS_MONO) ? 1 : 2;
+        mic_mask = 0;
+    } else {
+        for (int i = 0; i < 4; ++i) {
+            if (mic_mask & (1 << i)) {
+                channels++;
+            }
+        }
+        if (channels == 0) {
+            channels = 1;
+        }
+    }
     const size_t bps = (size_t)bits_per_sample;
     const size_t bytes_per_sample = bps / 8;
     const size_t buffer_size = (sr * channels * bytes_per_sample * record_duration_ms) / 1000;
@@ -1131,13 +1151,14 @@ esp_err_t audio_es_tools::record_test(uint32_t record_duration_ms)
 
 esp_err_t audio_es_tools::record_and_play_test(uint32_t record_duration_seconds)
 {
-    if (!es7210_initialized || !es8311_initialized) {
-        ESP_LOGE(TAG, "Audio devices not initialized (ES7210 or ES8311)");
-        return ESP_ERR_INVALID_STATE;
-    }
+    const bool capture_ready = (es7210_initialized && record_dev != nullptr) ||
+                               (es8311_initialized && es8311_has_adc_path() && record_dev == es8311_dev_handle);
+    const bool playback_ready = es8311_initialized && es8311_has_dac_path() && (play_dev != nullptr);
 
-    if (!record_dev || !play_dev) {
-        ESP_LOGE(TAG, "Record or playback device not available");
+    if (!capture_ready || !playback_ready) {
+        ESP_LOGE(TAG, "Audio pipeline not ready (capture=%s, playback=%s)",
+                 capture_ready ? "OK" : "NO",
+                 playback_ready ? "OK" : "NO");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1635,13 +1656,14 @@ esp_err_t audio_es_tools::record_and_play_test_with_channel_select(uint32_t reco
 
 esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seconds, bool loop_playback)
 {
-    if (!es7210_initialized || !es8311_initialized) {
-        ESP_LOGE(TAG, "Audio devices not initialized");
-        return ESP_ERR_INVALID_STATE;
-    }
+    const bool capture_ready = (es7210_initialized && record_dev != nullptr) ||
+                               (es8311_initialized && es8311_has_adc_path() && record_dev == es8311_dev_handle);
+    const bool playback_ready = es8311_initialized && es8311_has_dac_path() && (play_dev != nullptr);
 
-    if (!record_dev || !play_dev) {
-        ESP_LOGE(TAG, "Record or playback device not available");
+    if (!capture_ready || !playback_ready) {
+        ESP_LOGE(TAG, "Audio devices not initialized properly (capture=%s, playback=%s)",
+                 capture_ready ? "OK" : "NO",
+                 playback_ready ? "OK" : "NO");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -2872,14 +2894,18 @@ esp_err_t audio_es_tools::set_record_gain(float gain)
     record_gain = gain;
     ESP_LOGI(TAG, "Record gain set to %.1f dB", gain);
     
-    // 如果录音设备已初始化，立即应用新的增益设置
-    if (record_dev && es7210_initialized) {
-        esp_err_t ret = esp_codec_dev_set_in_gain(record_dev, gain);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to apply record gain %.1f dB: %s", gain, esp_err_to_name(ret));
-            return ret;
+    const bool es8311_adc_ready = es8311_initialized && es8311_has_adc_path() && (record_dev == es8311_dev_handle);
+    const bool es7210_adc_ready = es7210_initialized;
+
+    if (record_dev && (es7210_adc_ready || es8311_adc_ready)) {
+        int ret = esp_codec_dev_set_in_gain(record_dev, gain);
+        if (ret != ESP_CODEC_DEV_OK) {
+            ESP_LOGE(TAG, "Failed to apply record gain %.1f dB: %s", gain,
+                     esp_err_to_name(static_cast<esp_err_t>(ret)));
+            return static_cast<esp_err_t>(ret);
         }
-        ESP_LOGI(TAG, "Applied record gain %.1f dB to ES7210", gain);
+        ESP_LOGI(TAG, "Applied record gain %.1f dB to %s", gain,
+                 es7210_adc_ready ? "ES7210" : "ES8311");
     }
     
     return ESP_OK;
@@ -3068,9 +3094,12 @@ int audio_es_tools::count_selected_mics() const
 
 esp_err_t audio_es_tools::record_to_file(const char* filepath, uint32_t record_duration_seconds, size_t chunk_size)
 {
-    if (!system_initialized || !es7210_initialized || !record_dev) {
-        ESP_LOGE(TAG, "Audio recording path not ready (system:%d, es7210:%d, dev:%p)",
-                 system_initialized, es7210_initialized, record_dev);
+    const bool es8311_adc_ready = es8311_initialized && es8311_has_adc_path() && (record_dev == es8311_dev_handle);
+    const bool es7210_adc_ready = es7210_initialized;
+
+    if (!system_initialized || !record_dev || (!es7210_adc_ready && !es8311_adc_ready)) {
+        ESP_LOGE(TAG, "Audio recording path not ready (system:%d, es7210:%d, es8311_adc:%d, dev:%p)",
+                 system_initialized, es7210_initialized, es8311_adc_ready, record_dev);
         return ESP_ERR_INVALID_STATE;
     }
 

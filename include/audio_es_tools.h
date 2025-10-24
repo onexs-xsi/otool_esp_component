@@ -86,6 +86,18 @@ typedef enum {
 } audio_channels_t;
 
 /**
+ * @brief ES8311工作路径配置
+ *
+ * 通过按位组合选择 ES8311 的 ADC/DAC 功能。
+ */
+typedef enum {
+    ES8311_MODE_NONE = 0,                 ///< 不启用任何路径（无效配置）
+    ES8311_MODE_DAC = 1 << 0,             ///< 仅启用 DAC（播放）
+    ES8311_MODE_ADC = 1 << 1,             ///< 仅启用 ADC（录音）
+    ES8311_MODE_DAC_AND_ADC = ES8311_MODE_DAC | ES8311_MODE_ADC ///< 同时启用 ADC 与 DAC
+} es8311_path_mode_t;
+
+/**
  * @brief 音频采样率枚举
  * 
  * 定义常用的音频采样率
@@ -206,7 +218,7 @@ typedef enum {
 class audio_es_tools {
 private:
     esp_codec_dev_handle_t play_dev;        ///< 播放设备句柄（ES8311）
-    esp_codec_dev_handle_t record_dev;      ///< 录音设备句柄（ES7210）
+    esp_codec_dev_handle_t record_dev;      ///< 录音设备句柄（ES7210或ES8311 ADC）
     i2s_chan_handle_t tx_handle;            ///< I2S发送通道句柄
     i2s_chan_handle_t rx_handle;            ///< I2S接收通道句柄
     i2c_master_bus_handle_t i2c_bus_handle;        ///< I2C总线句柄
@@ -217,6 +229,8 @@ private:
     bool system_initialized;                ///< 音频系统初始化状态
     bool es8311_sleeping;                   ///< ES8311睡眠状态
     bool es7210_sleeping;                   ///< ES7210睡眠状态
+    esp_codec_dev_handle_t es8311_dev_handle = nullptr; ///< ES8311 设备句柄（可能同时用于播放与录音）
+    esp_codec_dec_work_mode_t es8311_work_mode = ESP_CODEC_DEV_WORK_MODE_NONE; ///< ES8311 当前工作模式
     
     // I2S引脚配置
     gpio_num_t i2s_bck_pin;                 ///< I2S BCK引脚
@@ -338,12 +352,14 @@ public:
     ~audio_es_tools();
 
     /**
-     * @brief 初始化ES8311音频芯片（DAC播放）
-     * 
-     * @param channels 音频声道配置（单声道或立体声）
+     * @brief 初始化 ES8311 音频芯片
+     *
+     * @param channels 音频声道配置（仅支持单声道或立体声）
+     * @param mode     指定启用 ADC、DAC 或全双工路径
      * @return esp_err_t 返回操作结果
      */
-    esp_err_t es8311_init(audio_channels_t channels);
+    esp_err_t es8311_init(audio_channels_t channels,
+                          es8311_path_mode_t mode = ES8311_MODE_DAC);
 
     /**
      * @brief 去初始化ES8311音频芯片
@@ -925,6 +941,9 @@ public:
      */
     void set_pins_high_z_on_sleep(bool enable) { pins_high_z_on_sleep = enable; }
     bool get_pins_high_z_on_sleep() const { return pins_high_z_on_sleep; }
+
+    bool es8311_has_dac_path() const { return (es8311_work_mode & ESP_CODEC_DEV_WORK_MODE_DAC) != 0; }
+    bool es8311_has_adc_path() const { return (es8311_work_mode & ESP_CODEC_DEV_WORK_MODE_ADC) != 0; }
 
     /**
      * @brief 设置TX（播放）声道数量

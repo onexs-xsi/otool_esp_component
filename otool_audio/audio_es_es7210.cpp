@@ -34,6 +34,11 @@ esp_err_t audio_es_tools::es7210_init(audio_channels_t channels, audio_mic_chann
         return ESP_OK;
     }
 
+    if (es8311_initialized && es8311_has_adc_path()) {
+        ESP_LOGE(TAG, "ES8311 ADC path already active; deinitialize ES8311 ADC before starting ES7210");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     uint8_t requested_mask = static_cast<uint8_t>(mic_channels);
     if (requested_mask == 0u) {
         ESP_LOGE(TAG, "ES7210 init requires at least one microphone (mask=0x%02X)", requested_mask);

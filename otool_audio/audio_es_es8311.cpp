@@ -27,149 +27,223 @@ static inline void _gpio_set_high_z(gpio_num_t pin)
     gpio_pulldown_dis(pin);
 }
 
-esp_err_t audio_es_tools::es8311_init(audio_channels_t channels)
+esp_err_t audio_es_tools::es8311_init(audio_channels_t channels, es8311_path_mode_t mode)
 {
+    esp_codec_dec_work_mode_t requested_mode = ESP_CODEC_DEV_WORK_MODE_NONE;
+    switch (mode) {
+        case ES8311_MODE_DAC:
+            requested_mode = ESP_CODEC_DEV_WORK_MODE_DAC;
+            break;
+        case ES8311_MODE_ADC:
+            requested_mode = ESP_CODEC_DEV_WORK_MODE_ADC;
+            break;
+        case ES8311_MODE_DAC_AND_ADC:
+            requested_mode = ESP_CODEC_DEV_WORK_MODE_BOTH;
+            break;
+        default:
+            requested_mode = ESP_CODEC_DEV_WORK_MODE_NONE;
+            break;
+    }
+
+    const bool enable_dac = (requested_mode & ESP_CODEC_DEV_WORK_MODE_DAC) != 0;
+    const bool enable_adc = (requested_mode & ESP_CODEC_DEV_WORK_MODE_ADC) != 0;
+
+    if (!enable_dac && !enable_adc) {
+        ESP_LOGE(TAG, "Invalid ES8311 mode: 0x%02X", static_cast<int>(mode));
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (channels != AUDIO_CHANNELS_MONO && channels != AUDIO_CHANNELS_STEREO) {
+        ESP_LOGE(TAG, "ES8311 supports MONO/STEREO only, requested=%d", static_cast<int>(channels));
+        return ESP_ERR_INVALID_ARG;
+    }
+
     if (es8311_initialized) {
-        ESP_LOGW(TAG, "ES8311 already initialized");
+        ESP_LOGW(TAG, "ES8311 already initialized (current mode=%u)", static_cast<unsigned>(es8311_work_mode));
         return ESP_OK;
     }
 
-    // 保存TX声道配置
-    this->tx_channels = channels;
+    if (enable_adc && es7210_initialized) {
+        ESP_LOGE(TAG, "ES7210 ADC already active, deinit it before enabling ES8311 ADC");
+        return ESP_ERR_INVALID_STATE;
+    }
 
-    ESP_LOGI(TAG, "Initializing ES8311 (DAC/Playback) with %s...", 
+    const char *mode_desc = enable_dac && enable_adc ? "DAC+ADC" : (enable_dac ? "DAC-only" : "ADC-only");
+
+    ESP_LOGI(TAG, "Initializing ES8311 with %s mode (%s)...",
+             mode_desc,
              (channels == AUDIO_CHANNELS_MONO) ? "MONO" : "STEREO");
-    
-    esp_err_t ret = ESP_OK;
-    
-    // 确保 I2S 通道存在
-    ret = ensure_i2s_channel();
+
+    esp_err_t ret = ensure_i2s_channel();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to ensure I2S channel: %s", esp_err_to_name(ret));
         return ret;
     }
-    
-    if (play_dev) {
-        ESP_LOGW(TAG, "ES8311 codec device already created");
-        return ESP_OK;
+
+    bool tx_was_configured = tx_configured;
+    bool rx_was_configured = rx_configured;
+
+    auto revert_i2s = [&]() {
+        if (enable_dac && !tx_was_configured && tx_configured) {
+            i2s_tx_deinit();
+        }
+        if (enable_adc && !rx_was_configured && rx_configured) {
+            i2s_rx_deinit();
+        }
+    };
+
+    if (enable_dac) {
+        tx_channels = channels;
+        if (!tx_configured) {
+            ret = i2s_tx_init();
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to configure I2S TX: %s", esp_err_to_name(ret));
+                revert_i2s();
+                return ret;
+            }
+        }
     }
 
-    // 仅播放其实只需要 TX，但底层数据接口可能允许同时给 RX，保持灵活
-    if (!tx_configured) {
-        ret = i2s_tx_init();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to configure I2S TX: %s", esp_err_to_name(ret));
-            return ret;
+    if (enable_adc) {
+        rx_channels = channels;
+        if (!rx_configured) {
+            ret = i2s_rx_init();
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to configure I2S RX: %s", esp_err_to_name(ret));
+                revert_i2s();
+                return ret;
+            }
         }
     }
 
     if (!i2c_bus_handle) {
         ESP_LOGE(TAG, "I2C bus handle not set, cannot create codec device");
+        revert_i2s();
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGI(TAG, "Creating ES8311 codec device...");
-
-    
-    // 1. 使用共享 I2S 数据接口(避免 mode conflict)
     if (!shared_i2s_data_if) {
         ESP_LOGE(TAG, "Shared I2S data interface not initialized");
+        revert_i2s();
         return ESP_ERR_INVALID_STATE;
     }
-    const audio_codec_data_if_t *data_if = shared_i2s_data_if;
 
-    // 2. 创建 I2C 控制接口
     audio_codec_i2c_cfg_t i2c_cfg = {};
     i2c_cfg.addr = ES8311_CODEC_DEFAULT_ADDR;
-    i2c_cfg.bus_handle = i2c_bus_handle; 
-    
+    i2c_cfg.bus_handle = i2c_bus_handle;
+
     const audio_codec_ctrl_if_t *ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
     if (!ctrl_if) {
         ESP_LOGE(TAG, "Failed to create I2C control interface");
-        // 不要删除共享接口
+        revert_i2s();
         return ESP_FAIL;
     }
-    
-    
-    // 3. 创建 GPIO 接口
+
     const audio_codec_gpio_if_t *gpio_if = audio_codec_new_gpio();
     if (!gpio_if) {
         ESP_LOGE(TAG, "Failed to create GPIO interface");
         audio_codec_delete_ctrl_if(ctrl_if);
-        // 不要删除共享接口
+        revert_i2s();
         return ESP_FAIL;
     }
-    
-    // 4. 创建 ES8311 编解码器接口
+
     es8311_codec_cfg_t es8311_cfg = {};
-    es8311_cfg.codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC;
+    es8311_cfg.codec_mode = requested_mode;
     es8311_cfg.ctrl_if = ctrl_if;
     es8311_cfg.gpio_if = gpio_if;
     es8311_cfg.pa_pin = pa_pin;
     es8311_cfg.use_mclk = true;
     es8311_cfg.pa_reverted = false;
-    
+
     const audio_codec_if_t *codec_if = es8311_codec_new(&es8311_cfg);
     if (!codec_if) {
         ESP_LOGE(TAG, "Failed to create ES8311 codec interface");
         audio_codec_delete_gpio_if(gpio_if);
         audio_codec_delete_ctrl_if(ctrl_if);
-        // 不要删除共享接口
+        revert_i2s();
         return ESP_FAIL;
     }
-    
-    // 5. 创建并配置播放设备
+
     esp_codec_dev_cfg_t codec_dev_cfg = {};
     codec_dev_cfg.codec_if = codec_if;
-    codec_dev_cfg.data_if = data_if;
-    codec_dev_cfg.dev_type = ESP_CODEC_DEV_TYPE_OUT;
-    
-    play_dev = esp_codec_dev_new(&codec_dev_cfg);
-    if (!play_dev) {
+    codec_dev_cfg.data_if = shared_i2s_data_if;
+    codec_dev_cfg.dev_type = enable_dac && enable_adc ? ESP_CODEC_DEV_TYPE_IN_OUT :
+                             (enable_dac ? ESP_CODEC_DEV_TYPE_OUT : ESP_CODEC_DEV_TYPE_IN);
+
+    esp_codec_dev_handle_t codec_handle = esp_codec_dev_new(&codec_dev_cfg);
+    if (!codec_handle) {
         ESP_LOGE(TAG, "Failed to create codec device");
         audio_codec_delete_codec_if(codec_if);
         audio_codec_delete_gpio_if(gpio_if);
         audio_codec_delete_ctrl_if(ctrl_if);
-        // 不要删除共享接口
+        revert_i2s();
         return ESP_FAIL;
     }
 
-    // 6. 设置播放音量
-    ret = esp_codec_dev_set_out_vol(play_dev, volume);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set output volume to %.1f: %s", volume, esp_err_to_name(ret));
-        esp_codec_dev_delete(play_dev);
-        play_dev = NULL;
-        audio_codec_delete_codec_if(codec_if);
-        audio_codec_delete_gpio_if(gpio_if);
-        audio_codec_delete_ctrl_if(ctrl_if);
-        // 不要删除共享接口
-        return ret;
+    auto cleanup = [&]() {
+        if (codec_handle) {
+            esp_codec_dev_delete(codec_handle);
+            codec_handle = nullptr;
+        }
+        if (codec_if) {
+            audio_codec_delete_codec_if(codec_if);
+            codec_if = nullptr;
+        }
+        if (gpio_if) {
+            audio_codec_delete_gpio_if(gpio_if);
+            gpio_if = nullptr;
+        }
+        if (ctrl_if) {
+            audio_codec_delete_ctrl_if(ctrl_if);
+            ctrl_if = nullptr;
+        }
+        revert_i2s();
+    };
+
+    if (enable_dac) {
+        ret = esp_codec_dev_set_out_vol(codec_handle, static_cast<int>(volume));
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set output volume to %.1f: %s", volume, esp_err_to_name(ret));
+            cleanup();
+            return ret;
+        }
     }
-    
-    // 7. 打开播放设备
+
     esp_codec_dev_sample_info_t fs = {};
-    fs.sample_rate = (uint32_t)sample_rate;
-    fs.channel = (uint32_t)channels;  // 使用传入的声道参数
-    fs.bits_per_sample = (uint32_t)bits_per_sample;
-    
-    ret = esp_codec_dev_open(play_dev, &fs);
+    fs.sample_rate = static_cast<uint32_t>(sample_rate);
+    fs.channel = (channels == AUDIO_CHANNELS_MONO) ? 1u : 2u;
+    fs.bits_per_sample = static_cast<uint32_t>(bits_per_sample);
+
+    ret = esp_codec_dev_open(codec_handle, &fs);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to open codec device: %s", esp_err_to_name(ret));
-        esp_codec_dev_delete(play_dev);
-        play_dev = NULL;
-        audio_codec_delete_codec_if(codec_if);
-        audio_codec_delete_gpio_if(gpio_if);
-        audio_codec_delete_ctrl_if(ctrl_if);
-        // 不要删除共享接口
+        cleanup();
         return ret;
     }
-    
+
+    if (enable_adc) {
+        int gain_ret = esp_codec_dev_set_in_gain(codec_handle, record_gain);
+        if (gain_ret != ESP_CODEC_DEV_OK) {
+            ESP_LOGW(TAG, "Failed to apply record gain %.1f dB: %s",
+                     record_gain, esp_err_to_name(static_cast<esp_err_t>(gain_ret)));
+        }
+    }
+
+    es8311_dev_handle = codec_handle;
+    if (enable_dac) {
+        play_dev = codec_handle;
+    }
+    if (enable_adc) {
+        record_dev = codec_handle;
+    }
+
+    es8311_work_mode = requested_mode;
     es8311_initialized = true;
-    incr_i2s_user();
     es8311_sleeping = false;
-    
-    ESP_LOGI(TAG, "ES8311 initialized successfully");
+    incr_i2s_user();
+
+    ESP_LOGI(TAG, "ES8311 initialized successfully (%s, %u Hz, %u bits)",
+             mode_desc, fs.sample_rate, fs.bits_per_sample);
     return ESP_OK;
 }
 
@@ -180,23 +254,40 @@ esp_err_t audio_es_tools::es8311_deinit()
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Deinitializing ES8311...");
-    
-    // 关闭并删除播放设备
-    if (play_dev) {
-        esp_codec_dev_close(play_dev);
-        esp_codec_dev_delete(play_dev);
+    ESP_LOGI(TAG, "Deinitializing ES8311 (mode=%u)...", static_cast<unsigned>(es8311_work_mode));
+
+    esp_codec_dev_handle_t handle = es8311_dev_handle ? es8311_dev_handle : play_dev;
+    if (!handle && record_dev && es8311_has_adc_path()) {
+        handle = record_dev;
+    }
+
+    if (handle) {
+        esp_codec_dev_close(handle);
+        esp_codec_dev_delete(handle);
+    }
+
+    if (play_dev == handle) {
         play_dev = NULL;
     }
-    // 由 esp_codec_dev_close 完成禁用，同步标志
-    tx_configured = false;
-    
-    // 仅减少引用计数；真正释放由引用计数归零时处理
+    if (record_dev == handle) {
+        record_dev = NULL;
+    }
+
+    if (es8311_has_dac_path()) {
+        tx_configured = false;
+    }
+    if (es8311_has_adc_path()) {
+        rx_configured = false;
+    }
+
+    es8311_dev_handle = NULL;
+    es8311_work_mode = ESP_CODEC_DEV_WORK_MODE_NONE;
+
     decr_i2s_user();
-    
+
     es8311_initialized = false;
     es8311_sleeping = false;
-    
+
     ESP_LOGI(TAG, "ES8311 deinitialized successfully");
     return ESP_OK;
 }
@@ -211,30 +302,43 @@ esp_err_t audio_es_tools::es8311_sleep()
     ESP_LOGI(TAG, "Putting ES8311 to sleep...");
     
     esp_err_t ret = ESP_OK;
-    
-    // 播放设备进入低功耗模式
-    if (play_dev) {
-        // 1. 设置输出音量为0（静音）
-        ret = esp_codec_dev_set_out_vol(play_dev, 0.0);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to mute ES8311: %s", esp_err_to_name(ret));
-        }
-        
-        // 2. 设置设备在关闭时禁用
-        ret = esp_codec_set_disable_when_closed(play_dev, true);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to set ES8311 disable when closed: %s", esp_err_to_name(ret));
-        }
-        
-        // 3. 关闭播放设备
-        ret = esp_codec_dev_close(play_dev);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to close ES8311: %s", esp_err_to_name(ret));
-        }
-        
-        ESP_LOGI(TAG, "ES8311 play device muted, disabled and closed");
+    esp_codec_dev_handle_t handle = es8311_dev_handle ? es8311_dev_handle : play_dev;
+    if (!handle && record_dev && es8311_has_adc_path()) {
+        handle = record_dev;
     }
-    
+
+    if (!handle) {
+        ESP_LOGE(TAG, "ES8311 device handle unavailable, cannot enter sleep");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (es8311_has_dac_path()) {
+        ret = esp_codec_dev_set_out_vol(handle, 0);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to mute ES8311 DAC: %s", esp_err_to_name(ret));
+        }
+    }
+
+    if (es8311_has_adc_path()) {
+        int mute_ret = esp_codec_dev_set_in_gain(handle, 0.0f);
+        if (mute_ret != ESP_CODEC_DEV_OK) {
+            ESP_LOGW(TAG, "Failed to reduce ES8311 ADC gain: %s",
+                     esp_err_to_name(static_cast<esp_err_t>(mute_ret)));
+        }
+    }
+
+    ret = esp_codec_set_disable_when_closed(handle, true);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to set ES8311 disable when closed: %s", esp_err_to_name(ret));
+    }
+
+    ret = esp_codec_dev_close(handle);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to close ES8311: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "ES8311 device closed for sleep");
+    }
+
     es8311_sleeping = true;
     
     ESP_LOGI(TAG, "ES8311 sleep mode enabled");
