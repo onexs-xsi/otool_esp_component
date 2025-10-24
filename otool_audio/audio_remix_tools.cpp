@@ -30,32 +30,120 @@ inline void* calloc_spiram(size_t count, size_t size)
 	return ptr;
 }
 
-inline float int_sample_to_float(int32_t sample, uint32_t bits)
+inline size_t get_sample_size(audio_data_type_t type)
 {
-	if (bits == 16) {
-		return static_cast<float>(sample) / 32768.0f;
+	switch (type) {
+		case AUDIO_TYPE_INT8:    return 1;
+		case AUDIO_TYPE_INT16:   return 2;
+		case AUDIO_TYPE_INT32:   return 4;
+		case AUDIO_TYPE_FLOAT32: return 4;
+		default: return 0;
 	}
-	if (bits == 32) {
-		return static_cast<float>(sample) / 2147483648.0f;
-	}
-	return 0.0f;
 }
 
-inline int32_t float_to_int_sample(float value, uint32_t bits)
+inline bool is_supported_type(audio_data_type_t type)
+{
+	return type == AUDIO_TYPE_INT8 || 
+	       type == AUDIO_TYPE_INT16 || 
+	       type == AUDIO_TYPE_INT32 || 
+	       type == AUDIO_TYPE_FLOAT32;
+}
+
+inline float int_sample_to_float(int32_t sample, audio_data_type_t type)
+{
+	switch (type) {
+		case AUDIO_TYPE_INT8:
+			return static_cast<float>(sample) / 128.0f;
+		case AUDIO_TYPE_INT16:
+			return static_cast<float>(sample) / 32768.0f;
+		case AUDIO_TYPE_INT32:
+			return static_cast<float>(sample) / 2147483648.0f;
+		default:
+			return 0.0f;
+	}
+}
+
+inline int32_t float_to_int_sample(float value, audio_data_type_t type)
 {
 	const float clamped = std::clamp(value, -1.0f, 1.0f);
-	if (bits == 16) {
-		return static_cast<int32_t>(std::lround(clamped * 32767.0f));
+	switch (type) {
+		case AUDIO_TYPE_INT8:
+			return static_cast<int32_t>(std::lround(clamped * 127.0f));
+		case AUDIO_TYPE_INT16:
+			return static_cast<int32_t>(std::lround(clamped * 32767.0f));
+		case AUDIO_TYPE_INT32:
+			return static_cast<int32_t>(std::llround(static_cast<double>(clamped) * 2147483647.0));
+		default:
+			return 0;
 	}
-	if (bits == 32) {
-		return static_cast<int32_t>(std::llround(static_cast<double>(clamped) * 2147483647.0));
-	}
-	return 0;
 }
 
-inline bool is_supported_bits(uint32_t bits)
+// 将任意类型的音频数据转换为float（归一化到[-1.0, 1.0]）
+void convert_to_float(const uint8_t* input, size_t total_samples, 
+                      audio_data_type_t input_type, float* output)
 {
-	return bits == 16 || bits == 32;
+	switch (input_type) {
+		case AUDIO_TYPE_INT8: {
+			const int8_t* in8 = reinterpret_cast<const int8_t*>(input);
+			for (size_t i = 0; i < total_samples; ++i) {
+				output[i] = int_sample_to_float(static_cast<int32_t>(in8[i]), AUDIO_TYPE_INT8);
+			}
+			break;
+		}
+		case AUDIO_TYPE_INT16: {
+			const int16_t* in16 = reinterpret_cast<const int16_t*>(input);
+			for (size_t i = 0; i < total_samples; ++i) {
+				output[i] = int_sample_to_float(static_cast<int32_t>(in16[i]), AUDIO_TYPE_INT16);
+			}
+			break;
+		}
+		case AUDIO_TYPE_INT32: {
+			const int32_t* in32 = reinterpret_cast<const int32_t*>(input);
+			for (size_t i = 0; i < total_samples; ++i) {
+				output[i] = int_sample_to_float(in32[i], AUDIO_TYPE_INT32);
+			}
+			break;
+		}
+		case AUDIO_TYPE_FLOAT32: {
+			const float* inf32 = reinterpret_cast<const float*>(input);
+			std::copy(inf32, inf32 + total_samples, output);
+			break;
+		}
+	}
+}
+
+// 将float数据转换为任意类型
+void convert_from_float(const float* input, size_t total_samples,
+                        audio_data_type_t output_type, uint8_t* output)
+{
+	switch (output_type) {
+		case AUDIO_TYPE_INT8: {
+			int8_t* out8 = reinterpret_cast<int8_t*>(output);
+			for (size_t i = 0; i < total_samples; ++i) {
+				out8[i] = static_cast<int8_t>(float_to_int_sample(input[i], AUDIO_TYPE_INT8));
+			}
+			break;
+		}
+		case AUDIO_TYPE_INT16: {
+			int16_t* out16 = reinterpret_cast<int16_t*>(output);
+			for (size_t i = 0; i < total_samples; ++i) {
+				out16[i] = static_cast<int16_t>(float_to_int_sample(input[i], AUDIO_TYPE_INT16));
+			}
+			break;
+		}
+		case AUDIO_TYPE_INT32: {
+			int32_t* out32 = reinterpret_cast<int32_t*>(output);
+			for (size_t i = 0; i < total_samples; ++i) {
+				out32[i] = float_to_int_sample(input[i], AUDIO_TYPE_INT32);
+			}
+			break;
+		}
+		case AUDIO_TYPE_FLOAT32: {
+			float* outf32 = reinterpret_cast<float*>(output);
+			std::copy(input, input + total_samples, outf32);
+			break;
+		}
+	}
 }
 
 esp_err_t resample_linear(const float* input,
@@ -169,27 +257,36 @@ esp_err_t convert_channels(const float* input,
 	return ESP_ERR_NOT_SUPPORTED;
 }
 
-template <typename TInt>
-void convert_float_to_int_buffer(const float* input,
-								 size_t total_samples,
-								 uint32_t target_bits,
-								 TInt* output)
+} // namespace
+
+// ============================================================================
+// 公共导出函数 - 辅助工具
+// ============================================================================
+
+audio_data_type_t bits_to_audio_data_type(uint32_t bits)
 {
-	for (size_t i = 0; i < total_samples; ++i) {
-		output[i] = static_cast<TInt>(float_to_int_sample(input[i], target_bits));
+	switch (bits) {
+		case 8:  return AUDIO_TYPE_INT8;
+		case 16: return AUDIO_TYPE_INT16;
+		case 32: return AUDIO_TYPE_INT32;
+		default: 
+			ESP_LOGW(TAG, "Unsupported bit depth: %lu, defaulting to 16-bit", bits);
+			return AUDIO_TYPE_INT16;
 	}
 }
 
-} // namespace
+// ============================================================================
+// 公共导出函数 - 格式转换
+// ============================================================================
 
 esp_err_t remix_convert_pcm_to_format(const uint8_t* input_data,
 									   size_t input_size,
 									   uint32_t input_rate,
 									   uint32_t input_channels,
-									   uint32_t input_bits,
+									   audio_data_type_t input_type,
 									   uint32_t target_rate,
 									   uint32_t target_channels,
-									   uint32_t target_bits,
+									   audio_data_type_t target_type,
 									   uint8_t** output_data,
 									   size_t* output_size)
 {
@@ -200,55 +297,73 @@ esp_err_t remix_convert_pcm_to_format(const uint8_t* input_data,
 	*output_data = nullptr;
 	*output_size = 0;
 
-	if (!input_data || input_size == 0 || input_rate == 0 || target_rate == 0 || input_channels == 0 || target_channels == 0) {
-		ESP_LOGE(TAG, "Invalid arguments: input=%p size=%zu rate_in=%u rate_out=%u ch_in=%u ch_out=%u",
+	if (!input_data || input_size == 0 || input_rate == 0 || target_rate == 0 || 
+	    input_channels == 0 || target_channels == 0) {
+		ESP_LOGE(TAG, "Invalid arguments: input=%p size=%zu rate_in=%lu rate_out=%lu ch_in=%lu ch_out=%lu",
 				 input_data, input_size, input_rate, target_rate, input_channels, target_channels);
 		return ESP_ERR_INVALID_ARG;
 	}
 
-	if (!is_supported_bits(input_bits) || !is_supported_bits(target_bits)) {
-		ESP_LOGE(TAG, "Unsupported bit depth: in=%u, out=%u", input_bits, target_bits);
+	if (!is_supported_type(input_type) || !is_supported_type(target_type)) {
+		ESP_LOGE(TAG, "Unsupported data type: in=%d, out=%d", input_type, target_type);
 		return ESP_ERR_NOT_SUPPORTED;
 	}
 
-	const size_t input_bytes_per_sample = input_bits / 8;
-	if (input_bytes_per_sample == 0 || (input_size % (input_bytes_per_sample * input_channels)) != 0) {
-		ESP_LOGE(TAG, "Input PCM size mismatch: bytes=%zu, in_bits=%u, channels=%u", input_size, input_bits, input_channels);
+	if (input_channels > 2 || target_channels > 2) {
+		ESP_LOGE(TAG, "Unsupported channel count: in=%lu, out=%lu (max=2)", input_channels, target_channels);
+		return ESP_ERR_NOT_SUPPORTED;
+	}
+
+	const size_t input_sample_size = get_sample_size(input_type);
+	if (input_sample_size == 0 || (input_size % (input_sample_size * input_channels)) != 0) {
+		ESP_LOGE(TAG, "Input size mismatch: bytes=%zu, type=%d, channels=%lu", 
+		         input_size, input_type, input_channels);
 		return ESP_ERR_INVALID_SIZE;
 	}
 
-	const bool need_resample = input_rate != target_rate;
-	const bool need_channel_convert = input_channels != target_channels;
-	const bool need_bit_convert = input_bits != target_bits;
+	// 检查是否需要任何转换
+	const bool need_resample = (input_rate != target_rate);
+	const bool need_channel_convert = (input_channels != target_channels);
+	const bool need_type_convert = (input_type != target_type);
 
-	if (!need_resample && !need_channel_convert && !need_bit_convert) {
+	if (!need_resample && !need_channel_convert && !need_type_convert) {
 		// 完全一致，无需转换
 		*output_data = nullptr;
 		*output_size = input_size;
+		ESP_LOGI(TAG, "No conversion needed (identical format)");
 		return ESP_OK;
 	}
 
-	const size_t samples_per_channel = input_size / (input_bytes_per_sample * input_channels);
-	const size_t total_samples = samples_per_channel * input_channels;
+	// 计算输入采样点数
+	const size_t samples_per_channel = input_size / (input_sample_size * input_channels);
+	const size_t total_input_samples = samples_per_channel * input_channels;
 
-	float* float_buffer = static_cast<float*>(calloc_spiram(total_samples, sizeof(float)));
+	// 辅助函数：获取类型名称字符串
+	auto get_type_name = [](audio_data_type_t type) -> const char* {
+		switch (type) {
+			case AUDIO_TYPE_INT8: return "i8";
+			case AUDIO_TYPE_INT16: return "i16";
+			case AUDIO_TYPE_INT32: return "i32";
+			case AUDIO_TYPE_FLOAT32: return "f32";
+			default: return "???";
+		}
+	};
+
+	ESP_LOGI(TAG, "Converting: %lux%lu@%luHz %s -> %lux%lu@%luHz %s",
+	         samples_per_channel, input_channels, input_rate, get_type_name(input_type),
+	         need_resample ? ((samples_per_channel * target_rate + input_rate/2) / input_rate) : samples_per_channel,
+	         target_channels, target_rate, get_type_name(target_type));
+
+	// 步骤1: 转换为float中间格式
+	float* float_buffer = static_cast<float*>(calloc_spiram(total_input_samples, sizeof(float)));
 	if (!float_buffer) {
-		ESP_LOGE(TAG, "Failed to allocate float conversion buffer (%zu samples)", total_samples);
+		ESP_LOGE(TAG, "Failed to allocate float buffer (%zu samples)", total_input_samples);
 		return ESP_ERR_NO_MEM;
 	}
 
-	if (input_bits == 16) {
-		const int16_t* in16 = reinterpret_cast<const int16_t*>(input_data);
-		for (size_t i = 0; i < total_samples; ++i) {
-			float_buffer[i] = int_sample_to_float(static_cast<int32_t>(in16[i]), 16);
-		}
-	} else {
-		const int32_t* in32 = reinterpret_cast<const int32_t*>(input_data);
-		for (size_t i = 0; i < total_samples; ++i) {
-			float_buffer[i] = int_sample_to_float(in32[i], 32);
-		}
-	}
+	convert_to_float(input_data, total_input_samples, input_type, float_buffer);
 
+	// 步骤2: 重采样（如果需要）
 	float* resampled_buffer = nullptr;
 	size_t current_samples_per_channel = samples_per_channel;
 	const float* current_buffer = float_buffer;
@@ -270,6 +385,7 @@ esp_err_t remix_convert_pcm_to_format(const uint8_t* input_data,
 		current_buffer = resampled_buffer;
 	}
 
+	// 步骤3: 声道转换（如果需要）
 	float* channel_buffer = nullptr;
 	const float* final_float_buffer = current_buffer;
 
@@ -289,63 +405,39 @@ esp_err_t remix_convert_pcm_to_format(const uint8_t* input_data,
 		current_channels = target_channels;
 	}
 
-	const size_t channel_samples_per_channel = current_samples_per_channel;
+	// 步骤4: 转换为目标数据类型
+	const size_t final_samples_per_channel = current_samples_per_channel;
+	const size_t final_total_samples = final_samples_per_channel * target_channels;
+	const size_t target_sample_size = get_sample_size(target_type);
 
-	if (!need_channel_convert && need_resample) {
-		final_float_buffer = current_buffer;
-	}
-
-	const uint32_t final_channels = current_channels;
-	const size_t final_total_samples = channel_samples_per_channel * final_channels;
-
-	if (final_total_samples == 0) {
+	if (final_total_samples == 0 || target_sample_size == 0) {
 		if (channel_buffer) heap_caps_free(channel_buffer);
 		if (resampled_buffer) heap_caps_free(resampled_buffer);
 		heap_caps_free(float_buffer);
-		ESP_LOGE(TAG, "Final sample count is zero");
+		ESP_LOGE(TAG, "Invalid final sample count or type");
 		return ESP_ERR_INVALID_SIZE;
 	}
 
-	const size_t target_bytes_per_sample = target_bits / 8;
-	if (target_bytes_per_sample == 0) {
-		if (channel_buffer) heap_caps_free(channel_buffer);
-		if (resampled_buffer) heap_caps_free(resampled_buffer);
-		heap_caps_free(float_buffer);
-		ESP_LOGE(TAG, "Invalid target bit depth: %u", target_bits);
-		return ESP_ERR_INVALID_ARG;
-	}
-
-	void* final_buffer = calloc_spiram(final_total_samples, target_bytes_per_sample);
+	void* final_buffer = calloc_spiram(final_total_samples, target_sample_size);
 	if (!final_buffer) {
 		if (channel_buffer) heap_caps_free(channel_buffer);
 		if (resampled_buffer) heap_caps_free(resampled_buffer);
 		heap_caps_free(float_buffer);
-		ESP_LOGE(TAG, "Failed to allocate final buffer (%zu samples)", final_total_samples);
+		ESP_LOGE(TAG, "Failed to allocate output buffer (%zu samples)", final_total_samples);
 		return ESP_ERR_NO_MEM;
 	}
 
-	if (target_bits == 16) {
-		auto* out16 = reinterpret_cast<int16_t*>(final_buffer);
-		convert_float_to_int_buffer(final_float_buffer, final_total_samples, 16, out16);
-	} else if (target_bits == 32) {
-		auto* out32 = reinterpret_cast<int32_t*>(final_buffer);
-		convert_float_to_int_buffer(final_float_buffer, final_total_samples, 32, out32);
-	} else {
-		// 理论上不会走到这里，前面已经过滤
-		heap_caps_free(final_buffer);
-		if (channel_buffer) heap_caps_free(channel_buffer);
-		if (resampled_buffer) heap_caps_free(resampled_buffer);
-		heap_caps_free(float_buffer);
-		ESP_LOGE(TAG, "Unsupported target bits: %u", target_bits);
-		return ESP_ERR_NOT_SUPPORTED;
-	}
+	convert_from_float(final_float_buffer, final_total_samples, target_type, 
+	                   static_cast<uint8_t*>(final_buffer));
 
 	*output_data = reinterpret_cast<uint8_t*>(final_buffer);
-	*output_size = final_total_samples * target_bytes_per_sample;
+	*output_size = final_total_samples * target_sample_size;
 
+	// 清理中间缓冲区
 	if (channel_buffer) heap_caps_free(channel_buffer);
 	if (resampled_buffer) heap_caps_free(resampled_buffer);
 	heap_caps_free(float_buffer);
 
+	ESP_LOGI(TAG, "Conversion completed: output_size=%zu bytes", *output_size);
 	return ESP_OK;
 }

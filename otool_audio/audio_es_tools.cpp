@@ -2221,10 +2221,10 @@ esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type, boo
                                       pcm_len,
                                       file_sample_rate_hz,
                                       static_cast<uint32_t>(file_channels),
-                                      static_cast<uint32_t>(file_bits),
+                                      bits_to_audio_data_type(static_cast<uint32_t>(file_bits)),
                                       system_sample_rate_hz,
                                       system_channels,
-                                      system_bits,
+                                      bits_to_audio_data_type(system_bits),
                                       &converted_buffer,
                                       &converted_size);
     if (ret != ESP_OK) {
@@ -2399,10 +2399,10 @@ esp_err_t audio_es_tools::play_audio_buffer_impl(const uint8_t* buffer, size_t b
                                           buffer_size,
                                           buffer_sample_rate_hz,
                                           static_cast<uint32_t>(buffer_channels),
-                                          static_cast<uint32_t>(buffer_bits),
+                                          bits_to_audio_data_type(static_cast<uint32_t>(buffer_bits)),
                                           system_sample_rate_hz,
                                           system_channels,
-                                          system_bits,
+                                          bits_to_audio_data_type(system_bits),
                                           &converted_buffer,
                                           &converted_size);
         if (ret != ESP_OK) {

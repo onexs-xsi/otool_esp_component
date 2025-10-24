@@ -6,161 +6,7 @@
 
  
 #include "audio_es_tools.h"
-
-namespace {
-
-/**
- * @brief 将浮点数值限制到int16_t范围内
- * 
- * @param value 输入的浮点数值
- * @return int16_t 限制后的int16_t值
- */
-static inline int16_t clamp_to_int16(double value)
-{
-    if (value > 32767.0) {
-        return 32767;
-    }
-    if (value < -32768.0) {
-        return -32768;
-    }
-    return static_cast<int16_t>(lrint(value));
-}
-
-/**
- * @brief 线性插值重采样（单声道）
- * 
- * 使用线性插值算法对单声道音频进行重采样。
- * 此函数会自动分配输出缓冲区，调用者需要负责释放。
- * 
- * @param input 输入音频数据缓冲区
- * @param input_samples 输入采样点数
- * @param input_rate 输入采样率（Hz）
- * @param output_rate 输出采样率（Hz）
- * @param output 输出音频数据缓冲区指针（由函数分配，使用SPIRAM）
- * @param output_samples 输出采样点数指针
- * 
- * @return esp_err_t 返回操作结果
- *         - ESP_OK: 重采样成功
- *         - ESP_ERR_INVALID_ARG: 参数无效
- *         - ESP_ERR_NO_MEM: 内存分配失败
- * 
- * @note 如果输入采样率等于输出采样率，函数会直接拷贝数据而不进行插值
- * @note 输出缓冲区使用SPIRAM分配，适合大容量音频数据
- */
-static esp_err_t resample_linear_mono(const int16_t *input,
-                                      size_t input_samples,
-                                      uint32_t input_rate,
-                                      uint32_t output_rate,
-                                      int16_t **output,
-                                      size_t *output_samples)
-{
-    if (!input || !output || !output_samples || input_samples == 0 || input_rate == 0 || output_rate == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    if (input_rate == output_rate) {
-        int16_t *copy = static_cast<int16_t *>(heap_caps_aligned_calloc(16, input_samples, sizeof(int16_t), MALLOC_CAP_SPIRAM));
-        if (!copy) {
-            return ESP_ERR_NO_MEM;
-        }
-        memcpy(copy, input, input_samples * sizeof(int16_t));
-        *output = copy;
-        *output_samples = input_samples;
-        return ESP_OK;
-    }
-
-    const double rate_ratio = static_cast<double>(input_rate) / static_cast<double>(output_rate);
-    size_t estimated_samples = static_cast<size_t>((static_cast<uint64_t>(input_samples) * output_rate + input_rate / 2) / input_rate);
-    if (estimated_samples == 0) {
-        estimated_samples = 1;
-    }
-
-    int16_t *out = static_cast<int16_t *>(heap_caps_aligned_calloc(16, estimated_samples + 2, sizeof(int16_t), MALLOC_CAP_SPIRAM));
-    if (!out) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    for (size_t i = 0; i < estimated_samples; ++i) {
-        const double src_pos = static_cast<double>(i) * rate_ratio;
-        const size_t idx = static_cast<size_t>(src_pos);
-        const double frac = src_pos - static_cast<double>(idx);
-
-        if (idx >= input_samples - 1) {
-            out[i] = input[input_samples - 1];
-            continue;
-        }
-
-        const double sample = (1.0 - frac) * static_cast<double>(input[idx]) + frac * static_cast<double>(input[idx + 1]);
-        out[i] = clamp_to_int16(sample);
-    }
-
-    *output = out;
-    *output_samples = estimated_samples;
-    return ESP_OK;
-}
-
-} // namespace
-
-
-// TEST_CASE("test afe aec interface", "[afe]")
-// {
-//     int start_size = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-
-//     afe_aec_handle_t *afe_aec_handle = afe_aec_create("MNR", 4, AFE_TYPE_SR, AFE_MODE_LOW_COST);
-//     aec_handle_t *aec_handle = aec_create(16000, 4, 1, AEC_MODE_SR_LOW_COST);
-//     int frame_size = afe_aec_handle->frame_size;
-//     int nch = afe_aec_handle->pcm_config.total_ch_num;
-//     int mic_idx = afe_aec_handle->pcm_config.mic_ids[0];
-//     int ref_idx = afe_aec_handle->pcm_config.ref_ids[0];
-//     int frame_bytes = frame_size * sizeof(int16_t);
-//     int16_t *afe_indata = (int16_t *)heap_caps_calloc(1, frame_bytes * nch, MALLOC_CAP_SPIRAM);
-//     int16_t *indata = (int16_t *)heap_caps_aligned_calloc(16, 1, frame_bytes, MALLOC_CAP_SPIRAM);
-//     int16_t *refdata = (int16_t *)heap_caps_aligned_calloc(16, 1, frame_bytes, MALLOC_CAP_SPIRAM);
-//     int16_t *outdata1 = (int16_t *)heap_caps_aligned_calloc(16, 1, frame_bytes, MALLOC_CAP_SPIRAM);
-//     int16_t *outdata2 = (int16_t *)heap_caps_aligned_calloc(16, 1, frame_bytes, MALLOC_CAP_SPIRAM);
-//     int chunks = 0;
-//     uint32_t c0, c1, t_aec = 0, t_afe_aec = 0;
-
-//     while (1) {
-//         if ((chunks + 1) * frame_bytes <= sizeof(audio_mic_file)) {
-//             memcpy(indata, audio_mic_file + chunks * frame_size, frame_bytes);
-//             memcpy(refdata, audio_ref_file + chunks * frame_size, frame_bytes);
-
-//             for (int i = 0; i < frame_size; i++) {
-//                 afe_indata[i * nch + mic_idx] = indata[i];
-//                 afe_indata[i * nch + ref_idx] = refdata[i];
-//             }
-//         } else {
-//             break;
-//         }
-
-//         c0 = esp_timer_get_time();
-//         afe_aec_process(afe_aec_handle, afe_indata, outdata1);
-//         c1 = esp_timer_get_time();
-//         t_afe_aec += c1 - c0;
-
-//         c0 = esp_timer_get_time();
-//         aec_process(aec_handle, indata, refdata, outdata2);
-//         c1 = esp_timer_get_time();
-
-//         t_aec += c1 - c0;
-//         chunks++;
-//     }
-
-//     for (int i = 0; i < frame_size; i++) {
-//         assert(outdata1[i] == outdata2[i]);
-//     }
-//     printf("afe aec interface:%d\n, aec interface:%d\n", t_afe_aec, t_aec);
-//     afe_aec_destroy(afe_aec_handle);
-//     aec_destroy(aec_handle);
-//     free(afe_indata);
-//     free(indata);
-//     free(refdata);
-//     free(outdata1);
-//     free(outdata2);
-//     int end_size = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-//     TEST_ASSERT_EQUAL(true, end_size == start_size);
-// }
+#include "audio_remix_tools.h"
 
 static const char *TAG_AEC = "audio_aec_test";
 
@@ -426,27 +272,49 @@ esp_err_t audio_es_tools::aec_test(uint32_t record_duration_seconds, int filter_
                  system_sample_rate, aec_sample_rate);
         
         int64_t resample_start = esp_timer_get_time();
-        size_t resample_temp_samples = 0;
+        size_t output_size_temp = 0;
 
-        // 重采样麦克风数据
-        ret = resample_linear_mono(mic_data_system, samples_recorded_system, system_sample_rate, 
-                                   aec_sample_rate, &resample_temp_mic, &resample_temp_samples);
-        if (ret == ESP_OK && resample_temp_samples <= total_samples_aec) {
-            memcpy(mic_data_aec, resample_temp_mic, resample_temp_samples * sizeof(int16_t));
+        // 重采样麦克风数据（int16单声道）
+        ret = remix_convert_pcm_to_format(
+            (uint8_t*)mic_data_system, samples_recorded_system * sizeof(int16_t),
+            system_sample_rate, 1, AUDIO_TYPE_INT16,
+            aec_sample_rate, 1, AUDIO_TYPE_INT16,
+            (uint8_t**)&resample_temp_mic, &output_size_temp);
+        
+        if (ret == ESP_OK) {
+            size_t output_samples = output_size_temp / sizeof(int16_t);
+            if (output_samples <= total_samples_aec) {
+                memcpy(mic_data_aec, resample_temp_mic, output_size_temp);
+            } else {
+                ESP_LOGE(TAG_AEC, "Mic resample size mismatch: got %zu, expected <=%zu", output_samples, total_samples_aec);
+                ret = ESP_FAIL;
+                goto cleanup;
+            }
         } else {
             ESP_LOGE(TAG_AEC, "Failed to resample mic data: %s", esp_err_to_name(ret));
-            if (ret == ESP_OK) ret = ESP_FAIL; // Mismatch in samples
             goto cleanup;
         }
 
-        // 重采样参考数据
-        ret = resample_linear_mono(ref_data_system, samples_recorded_system, system_sample_rate, 
-                                   aec_sample_rate, &resample_temp_ref, &resample_temp_samples);
-        if (ret == ESP_OK && resample_temp_samples <= total_samples_aec) {
-            memcpy(ref_data_aec, resample_temp_ref, resample_temp_samples * sizeof(int16_t));
+        // 重采样参考数据（int16单声道）
+        uint8_t *resample_temp_ref_u8 = nullptr;
+        ret = remix_convert_pcm_to_format(
+            (uint8_t*)ref_data_system, samples_recorded_system * sizeof(int16_t),
+            system_sample_rate, 1, AUDIO_TYPE_INT16,
+            aec_sample_rate, 1, AUDIO_TYPE_INT16,
+            &resample_temp_ref_u8, &output_size_temp);
+        
+        if (ret == ESP_OK) {
+            resample_temp_ref = (int16_t*)resample_temp_ref_u8;
+            size_t output_samples = output_size_temp / sizeof(int16_t);
+            if (output_samples <= total_samples_aec) {
+                memcpy(ref_data_aec, resample_temp_ref, output_size_temp);
+            } else {
+                ESP_LOGE(TAG_AEC, "Ref resample size mismatch: got %zu, expected <=%zu", output_samples, total_samples_aec);
+                ret = ESP_FAIL;
+                goto cleanup;
+            }
         } else {
             ESP_LOGE(TAG_AEC, "Failed to resample ref data: %s", esp_err_to_name(ret));
-            if (ret == ESP_OK) ret = ESP_FAIL; // Mismatch in samples
             goto cleanup;
         }
 
@@ -495,16 +363,26 @@ esp_err_t audio_es_tools::aec_test(uint32_t record_duration_seconds, int filter_
                  aec_sample_rate, system_sample_rate);
         
         int64_t resample_start = esp_timer_get_time();
-        size_t resample_output_samples = 0;
+        size_t output_size_temp = 0;
 
-        // 重采样AEC处理后的数据
-        ret = resample_linear_mono(output_data_aec, total_samples_aec, aec_sample_rate, 
-                                   system_sample_rate, &resample_temp_output, &resample_output_samples);
-        if (ret == ESP_OK && resample_output_samples <= total_samples_system) {
-            memcpy(output_data_system, resample_temp_output, resample_output_samples * sizeof(int16_t));
+        // 重采样AEC处理后的数据（int16单声道）
+        ret = remix_convert_pcm_to_format(
+            (uint8_t*)output_data_aec, total_samples_aec * sizeof(int16_t),
+            aec_sample_rate, 1, AUDIO_TYPE_INT16,
+            system_sample_rate, 1, AUDIO_TYPE_INT16,
+            (uint8_t**)&resample_temp_output, &output_size_temp);
+        
+        if (ret == ESP_OK) {
+            size_t output_samples = output_size_temp / sizeof(int16_t);
+            if (output_samples <= total_samples_system) {
+                memcpy(output_data_system, resample_temp_output, output_size_temp);
+            } else {
+                ESP_LOGE(TAG_AEC, "Output resample size mismatch: got %zu, expected <=%zu", output_samples, total_samples_system);
+                ret = ESP_FAIL;
+                goto cleanup;
+            }
         } else {
             ESP_LOGE(TAG_AEC, "Failed to resample output data: %s", esp_err_to_name(ret));
-            if (ret == ESP_OK) ret = ESP_FAIL; // Mismatch in samples
             goto cleanup;
         }
 
@@ -627,10 +505,10 @@ cleanup:
         free(ref_data_aec);
         free(output_data_aec);
     }
-    // These are allocated inside resample_linear_mono, so free them separately
-    free(resample_temp_mic);
-    free(resample_temp_ref);
-    free(resample_temp_output);
+    // Note: These buffers are allocated by remix_convert_pcm_to_format()
+    heap_caps_free(resample_temp_mic);
+    heap_caps_free(resample_temp_ref);
+    heap_caps_free(resample_temp_output);
 
     // 测试结束后清空播放管线，避免残留音频
     {
