@@ -69,7 +69,7 @@ esp_err_t esp_sd_tool_comprehensive_test(sd_test_mode_t mode);
 
 ### 基本使用
 ```c
-#include "esp_sd_tool.h"
+#include "sd_tool.h"
 
 void app_main(void) {
     // 运行 MMC 1位模式综合测试
@@ -82,7 +82,7 @@ void app_main(void) {
 
 ### 高级使用
 ```c
-#include "esp_sd_tool.h"
+#include "sd_tool.h"
 
 void advanced_sd_test(void) {
     sdmmc_card_t *card = NULL;

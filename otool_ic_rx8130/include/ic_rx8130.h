@@ -53,9 +53,9 @@ struct rtc_task {
           callback(cb), is_active(true), created_time(time(NULL)), description(desc) {}
 };
 
-class ic_rx8130_tools {
+class rx8130_tools {
 public:
-    ic_rx8130_tools()
+    rx8130_tools()
     {
         _i2c_device_handle = NULL;
         _i2c_bus_device_handle = NULL;

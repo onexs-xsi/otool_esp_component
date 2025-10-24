@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
- 
-#include "audio_es_tools.h"
+#include "audio_tools.h"
 #include "audio_remix_tools.h"
 
 static const char *TAG_AEC = "audio_aec_test";
@@ -31,7 +30,7 @@ static const char *TAG_AEC = "audio_aec_test";
  *         - ESP_ERR_NO_MEM: 内存分配失败
  *         - 其他: 底层驱动错误
  */
-esp_err_t audio_es_tools::aec_test(uint32_t record_duration_seconds, int filter_length, afe_mode_t aec_mode, bool play_original_audio)
+esp_err_t audio_tools::aec_test(uint32_t record_duration_seconds, int filter_length, afe_mode_t aec_mode, bool play_original_audio)
 {
     esp_err_t ret = ESP_OK;
     afe_aec_handle_t *aec_handle = nullptr;
@@ -541,7 +540,7 @@ cleanup:
  *         - ESP_ERR_NO_MEM: 内存分配失败
  *         - 其他: 底层驱动错误
  */
-esp_err_t audio_es_tools::test_aec_loopback(uint32_t record_duration_seconds, uint8_t play_channels)
+esp_err_t audio_tools::test_aec_loopback(uint32_t record_duration_seconds, uint8_t play_channels)
 {
     esp_err_t ret = ESP_OK;
     int16_t *mic_data = nullptr;

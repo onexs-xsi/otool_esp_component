@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "audio_es_tools.h"
+#include "audio_tools.h"
 #include "driver/i2s_std.h"
 #if SOC_I2S_SUPPORTS_TDM
 #include "driver/i2s_tdm.h"
@@ -32,8 +32,8 @@ extern const uint8_t _binary_candy_wind_pcm_1ch_16k_16bit_9s_pcm_end[];
 #endif
 
 #ifdef USE_AUDIO_CANDY_WIND_1CH_44K_16BIT_45S
-extern const uint8_t _binary_candy_wind_pcm_1ch_44_1k_16bit_45_5s_pcm_start[];
-extern const uint8_t _binary_candy_wind_pcm_1ch_44_1k_16bit_45_5s_pcm_end[];
+extern const uint8_t _binary_candy_wind_pcm_1ch_44_1k_16bit_45s_pcm_start[];
+extern const uint8_t _binary_candy_wind_pcm_1ch_44_1k_16bit_45s_pcm_end[];
 #endif
 
 #ifdef USE_AUDIO_CANDY_WIND_2CH_16K_16BIT_9S
@@ -42,8 +42,8 @@ extern const uint8_t _binary_candy_wind_pcm_2ch_16k_16bit_9s_pcm_end[];
 #endif
 
 #ifdef USE_AUDIO_CANDY_WIND_2CH_44K_16BIT_45S
-extern const uint8_t _binary_candy_wind_pcm_2ch_44_1k_16bit_45_5s_pcm_start[];
-extern const uint8_t _binary_candy_wind_pcm_2ch_44_1k_16bit_45_5s_pcm_end[];
+extern const uint8_t _binary_candy_wind_pcm_2ch_44_1k_16bit_45s_pcm_start[];
+extern const uint8_t _binary_candy_wind_pcm_2ch_44_1k_16bit_45s_pcm_end[];
 #endif
 
 #ifdef USE_AUDIO_SINE_440HZ_2CH_16K_16BIT_10S
@@ -61,7 +61,7 @@ extern const uint8_t _binary_startup_pcm_2ch_16k_16bit_4s_pcm_start[];
 extern const uint8_t _binary_startup_pcm_2ch_16k_16bit_4s_pcm_end[];
 #endif
 
-static const char *TAG = "audio_es_tools";
+static const char *TAG = "audio_tools";
 static constexpr size_t SILENCE_CHUNK_CAPACITY = 1024;
 static uint8_t g_silence_chunk[SILENCE_CHUNK_CAPACITY] = {0};
 
@@ -83,8 +83,8 @@ static bool get_candy_wind_1ch_16k_data(const uint8_t*& start, size_t& len) {
 
 #ifdef USE_AUDIO_CANDY_WIND_1CH_44K_16BIT_45S
 static bool get_candy_wind_1ch_44k_data(const uint8_t*& start, size_t& len) {
-    start = _binary_candy_wind_pcm_1ch_44_1k_16bit_45_5s_pcm_start;
-    len = _binary_candy_wind_pcm_1ch_44_1k_16bit_45_5s_pcm_end - _binary_candy_wind_pcm_1ch_44_1k_16bit_45_5s_pcm_start;
+    start = _binary_candy_wind_pcm_1ch_44_1k_16bit_45s_pcm_start;
+    len = _binary_candy_wind_pcm_1ch_44_1k_16bit_45s_pcm_end - _binary_candy_wind_pcm_1ch_44_1k_16bit_45s_pcm_start;
     return true;
 }
 #endif
@@ -99,8 +99,16 @@ static bool get_candy_wind_2ch_16k_data(const uint8_t*& start, size_t& len) {
 
 #ifdef USE_AUDIO_CANDY_WIND_2CH_44K_16BIT_45S
 static bool get_candy_wind_2ch_44k_data(const uint8_t*& start, size_t& len) {
-    start = _binary_candy_wind_pcm_2ch_44_1k_16bit_45_5s_pcm_start;
-    len = _binary_candy_wind_pcm_2ch_44_1k_16bit_45_5s_pcm_end - _binary_candy_wind_pcm_2ch_44_1k_16bit_45_5s_pcm_start;
+    start = _binary_candy_wind_pcm_2ch_44_1k_16bit_45s_pcm_start;
+    len = _binary_candy_wind_pcm_2ch_44_1k_16bit_45s_pcm_end - _binary_candy_wind_pcm_2ch_44_1k_16bit_45s_pcm_start;
+    return true;
+}
+#endif
+
+#ifdef USE_AUDIO_SINE_440HZ_2CH_16K_16BIT_10S
+static bool get_sine_440hz_2ch_16k_data(const uint8_t*& start, size_t& len) {
+    start = _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_start;
+    len = _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_end - _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_start;
     return true;
 }
 #endif
@@ -121,14 +129,6 @@ static bool get_startup_2ch_16k_data(const uint8_t*& start, size_t& len) {
 }
 #endif
 
-#ifdef USE_AUDIO_SINE_440HZ_2CH_16K_16BIT_10S
-static bool get_sine_440hz_2ch_16k_data(const uint8_t*& start, size_t& len) {
-    start = _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_start;
-    len = _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_end - _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_start;
-    return true;
-}
-#endif
-
 struct AudioFileMetadata {
     audio_file_type_t type;
     const char* filename;
@@ -140,25 +140,25 @@ struct AudioFileMetadata {
 
 static const AudioFileMetadata AUDIO_FILE_TABLE[] = {
 #ifdef USE_AUDIO_CANDY_WIND_1CH_16K_16BIT_9S
-    {AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S,  "candy_wind_pcm_1ch_16k_16bit_9s.pcm",     16000, AUDIO_CHANNELS_MONO,   I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_1ch_16k_data},
+    {AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S, "candy_wind_pcm_1ch_16k_16bit_9s.pcm", 16000, AUDIO_CHANNELS_MONO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_1ch_16k_data},
 #endif
 #ifdef USE_AUDIO_CANDY_WIND_1CH_44K_16BIT_45S
-    {AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S, "candy_wind_pcm_1ch_44.1k_16bit_45.5s.pcm", 44100, AUDIO_CHANNELS_MONO,   I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_1ch_44k_data},
+    {AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S, "candy_wind_pcm_1ch_44.1k_16bit_45s.pcm", 44100, AUDIO_CHANNELS_MONO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_1ch_44k_data},
 #endif
 #ifdef USE_AUDIO_CANDY_WIND_2CH_16K_16BIT_9S
-    {AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S,  "candy_wind_pcm_2ch_16k_16bit_9s.pcm",     16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_2ch_16k_data},
+    {AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S, "candy_wind_pcm_2ch_16k_16bit_9s.pcm", 16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_2ch_16k_data},
 #endif
 #ifdef USE_AUDIO_CANDY_WIND_2CH_44K_16BIT_45S
-    {AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S, "candy_wind_pcm_2ch_44.1k_16bit_45.5s.pcm", 44100, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_2ch_44k_data},
-#endif
-#ifdef USE_AUDIO_STARTUP_1CH_16K_16BIT_4S
-    {AUDIO_FILE_STARTUP_1CH_16K_16B_4S,     "startup_pcm_1ch_16k_16bit_4s.pcm",        16000, AUDIO_CHANNELS_MONO,   I2S_DATA_BIT_WIDTH_16BIT, get_startup_1ch_16k_data},
-#endif
-#ifdef USE_AUDIO_STARTUP_2CH_16K_16BIT_4S
-    {AUDIO_FILE_STARTUP_2CH_16K_16B_4S,     "startup_pcm_2ch_16k_16bit_4s.pcm",        16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_startup_2ch_16k_data},
+    {AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S, "candy_wind_pcm_2ch_44.1k_16bit_45s.pcm", 44100, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_2ch_44k_data},
 #endif
 #ifdef USE_AUDIO_SINE_440HZ_2CH_16K_16BIT_10S
-    {AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S, "sine_440Hz_pcm_2ch_16k_16bit_10s.pcm",    16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_sine_440hz_2ch_16k_data},
+    {AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S, "sine_440Hz_pcm_2ch_16k_16bit_10s.pcm", 16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_sine_440hz_2ch_16k_data},
+#endif
+#ifdef USE_AUDIO_STARTUP_1CH_16K_16BIT_4S
+    {AUDIO_FILE_STARTUP_1CH_16K_16B_4S, "startup_pcm_1ch_16k_16bit_4s.pcm", 16000, AUDIO_CHANNELS_MONO, I2S_DATA_BIT_WIDTH_16BIT, get_startup_1ch_16k_data},
+#endif
+#ifdef USE_AUDIO_STARTUP_2CH_16K_16BIT_4S
+    {AUDIO_FILE_STARTUP_2CH_16K_16B_4S, "startup_pcm_2ch_16k_16bit_4s.pcm", 16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_startup_2ch_16k_data},
 #endif
 };
 
@@ -192,7 +192,7 @@ static inline uint32_t load_uint32_le(const uint8_t* ptr)
 
 } // namespace
 
-void audio_es_tools::free_channel_split_result(channel_split_result_t& result)
+void audio_tools::free_channel_split_result(channel_split_result_t& result)
 {
     for (int i = 0; i < 4; ++i) {
         if (result.mic_buffers[i]) {
@@ -206,7 +206,7 @@ void audio_es_tools::free_channel_split_result(channel_split_result_t& result)
     result.status = ESP_OK;
 }
 
-channel_split_result_t audio_es_tools::split_recorded_channels(const uint8_t* record_buffer,
+channel_split_result_t audio_tools::split_recorded_channels(const uint8_t* record_buffer,
                                                               size_t bytes_read,
                                                               const esp_codec_dev_sample_info_t& fs,
                                                               bool is_tdm_mode,
@@ -430,7 +430,7 @@ channel_split_result_t audio_es_tools::split_recorded_channels(const uint8_t* re
     return result;
 }
 
-void audio_es_tools::compute_split_channel_quality(const channel_split_result_t& split_result,
+void audio_tools::compute_split_channel_quality(const channel_split_result_t& split_result,
                                                    mic_channel_quality_t quality[4])
 {
     const size_t samples = split_result.samples_per_channel;
@@ -568,7 +568,7 @@ static esp_err_t ensure_parent_directories(const char* filepath)
  * 
  * 本音频工具类采用模块化设计，将功能拆分为以下几个部分：
  * 
- * 1. audio_es_tools.cpp (主文件)
+ * 1. audio_tools.cpp (主文件)
  *    - 系统级初始化和配置管理
  *    - I2S通道创建和管理  
  *    - 通用音频播放和测试功能
@@ -586,7 +586,7 @@ static esp_err_t ensure_parent_directories(const char* filepath)
  *    - ES7210特定的配置和控制
  * 
  * 未来扩展新音频设备时，只需：
- * 1. 创建对应的 audio_es_xxx.cpp 文件
+ * 1. 创建对应的 audio_xxx.cpp 文件
  * 2. 在主类中添加相应的初始化接口
  * 3. 确保与现有I2S管理系统兼容
  * 
@@ -607,9 +607,9 @@ static inline void _gpio_set_high_z(gpio_num_t pin)
 }
 
 // 构造函数（默认参数）
-audio_es_tools::audio_es_tools()
+audio_tools::audio_tools()
 {
-    ESP_LOGI(TAG, "audio_es_tools object created with default parameters");
+    ESP_LOGI(TAG, "audio_tools object created with default parameters");
     play_dev = NULL;
     record_dev = NULL;
     es8311_dev_handle = NULL;
@@ -654,10 +654,10 @@ audio_es_tools::audio_es_tools()
 }
 
 // 构造函数（带参数）
-audio_es_tools::audio_es_tools(gpio_num_t bck_pin, gpio_num_t mck_pin, gpio_num_t data_in_pin, 
+audio_tools::audio_tools(gpio_num_t bck_pin, gpio_num_t mck_pin, gpio_num_t data_in_pin, 
                                gpio_num_t data_out_pin, gpio_num_t ws_pin, gpio_num_t pa_pin)
 {
-    ESP_LOGI(TAG, "audio_es_tools object created with custom parameters");
+    ESP_LOGI(TAG, "audio_tools object created with custom parameters");
     play_dev = NULL;
     record_dev = NULL;
     es8311_dev_handle = NULL;
@@ -696,7 +696,7 @@ audio_es_tools::audio_es_tools(gpio_num_t bck_pin, gpio_num_t mck_pin, gpio_num_
 }
 
 // 析构函数
-audio_es_tools::~audio_es_tools()
+audio_tools::~audio_tools()
 {
     if (playback_task_handle) {
         ESP_LOGW(TAG, "Waiting for playback task to finish before destruction");
@@ -704,7 +704,7 @@ audio_es_tools::~audio_es_tools()
             vTaskDelay(pdMS_TO_TICKS(20));
         }
     }
-    ESP_LOGI(TAG, "audio_es_tools object destroyed");
+    ESP_LOGI(TAG, "audio_tools object destroyed");
     // 清理音频资源
     audio_system_deinit();
     
@@ -716,19 +716,19 @@ audio_es_tools::~audio_es_tools()
 }
 
 // 内部辅助：确保 I2S 通道存在
-esp_err_t audio_es_tools::ensure_i2s_channel()
+esp_err_t audio_tools::ensure_i2s_channel()
 {
     if (tx_handle && rx_handle) return ESP_OK;
     return i2s_channel_init();
 }
 
-void audio_es_tools::incr_i2s_user()
+void audio_tools::incr_i2s_user()
 {
     i2s_user_count++;
     ESP_LOGD(TAG, "I2S user ++ => %d", i2s_user_count);
 }
 
-void audio_es_tools::decr_i2s_user()
+void audio_tools::decr_i2s_user()
 {
     if (i2s_user_count > 0) {
         i2s_user_count--;
@@ -737,7 +737,7 @@ void audio_es_tools::decr_i2s_user()
     try_release_i2s();
 }
 
-void audio_es_tools::try_release_i2s()
+void audio_tools::try_release_i2s()
 {
     if (suppress_release) {
         ESP_LOGD(TAG, "Suppressing I2S release (system deinit in progress)");
@@ -751,7 +751,7 @@ void audio_es_tools::try_release_i2s()
     }
 }
 
-esp_err_t audio_es_tools::i2s_channel_init()
+esp_err_t audio_tools::i2s_channel_init()
 {
     if (tx_handle && rx_handle) {
         ESP_LOGW(TAG, "I2S channels already initialized");
@@ -778,7 +778,7 @@ esp_err_t audio_es_tools::i2s_channel_init()
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::i2s_channel_deinit()
+esp_err_t audio_tools::i2s_channel_deinit()
 {
     if (!tx_handle && !rx_handle) {
         ESP_LOGW(TAG, "I2S channels not initialized");
@@ -832,7 +832,7 @@ esp_err_t audio_es_tools::i2s_channel_deinit()
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::i2s_tx_init()
+esp_err_t audio_tools::i2s_tx_init()
 {
     if (!tx_handle) {
         ESP_LOGE(TAG, "I2S TX handle not available, call i2s_channel_init() first");
@@ -886,7 +886,7 @@ esp_err_t audio_es_tools::i2s_tx_init()
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::i2s_tx_deinit()
+esp_err_t audio_tools::i2s_tx_deinit()
 {
     if (!tx_handle) {
         ESP_LOGW(TAG, "I2S TX not initialized");
@@ -911,7 +911,7 @@ esp_err_t audio_es_tools::i2s_tx_deinit()
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::i2s_rx_init()
+esp_err_t audio_tools::i2s_rx_init()
 {
     if (!rx_handle) {
         ESP_LOGE(TAG, "I2S RX handle not available, call i2s_channel_init() first");
@@ -979,7 +979,7 @@ esp_err_t audio_es_tools::i2s_rx_init()
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::i2s_rx_deinit()
+esp_err_t audio_tools::i2s_rx_deinit()
 {
     if (!rx_handle) {
         ESP_LOGW(TAG, "I2S RX not initialized");
@@ -1011,7 +1011,7 @@ esp_err_t audio_es_tools::i2s_rx_deinit()
 // ES8311相关函数实现在 audio_es_es8311.cpp
 // ES7210相关函数实现在 audio_es_es7210.cpp
 
-esp_err_t audio_es_tools::audio_system_init(i2c_master_bus_handle_t i2c_bus_handle, i2s_port_t i2s_port_num, audio_sample_rate_t sample_rate, i2s_data_bit_width_t bits_per_sample)
+esp_err_t audio_tools::audio_system_init(i2c_master_bus_handle_t i2c_bus_handle, i2s_port_t i2s_port_num, audio_sample_rate_t sample_rate, i2s_data_bit_width_t bits_per_sample)
 {
     if (system_initialized) {
         ESP_LOGW(TAG, "Audio system already initialized");
@@ -1069,7 +1069,7 @@ esp_err_t audio_es_tools::audio_system_init(i2c_master_bus_handle_t i2c_bus_hand
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::audio_system_deinit()
+esp_err_t audio_tools::audio_system_deinit()
 {
     // 获取互斥锁保护
     if (audio_mutex && xSemaphoreTake(audio_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
@@ -1113,7 +1113,7 @@ esp_err_t audio_es_tools::audio_system_deinit()
 
 // ES8311和ES7210的睡眠功能实现已移至对应的独立源文件中
 
-esp_err_t audio_es_tools::audio_system_sleep()
+esp_err_t audio_tools::audio_system_sleep()
 {
     if (!system_initialized) {
         ESP_LOGE(TAG, "Audio system not initialized");
@@ -1135,7 +1135,7 @@ esp_err_t audio_es_tools::audio_system_sleep()
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::record_test(uint32_t record_duration_ms)
+esp_err_t audio_tools::record_test(uint32_t record_duration_ms)
 {
     const bool using_es8311_adc = es8311_initialized && es8311_has_adc_path() && (record_dev == es8311_dev_handle);
     const bool using_es7210_adc = es7210_initialized && !using_es8311_adc;
@@ -1253,7 +1253,7 @@ esp_err_t audio_es_tools::record_test(uint32_t record_duration_ms)
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::record_and_play_test(uint32_t record_duration_seconds)
+esp_err_t audio_tools::record_and_play_test(uint32_t record_duration_seconds)
 {
     const bool capture_ready = (es7210_initialized && record_dev != nullptr) ||
                                (es8311_initialized && es8311_has_adc_path() && record_dev == es8311_dev_handle);
@@ -1481,7 +1481,7 @@ esp_err_t audio_es_tools::record_and_play_test(uint32_t record_duration_seconds)
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::record_and_play_test_with_channel_select(uint32_t record_duration_seconds, audio_mic_channel_t target_mic_channel, bool analysis_only)
+esp_err_t audio_tools::record_and_play_test_with_channel_select(uint32_t record_duration_seconds, audio_mic_channel_t target_mic_channel, bool analysis_only)
 {
     // 仅分析模式只需要ES7210初始化
     if (!es7210_initialized) {
@@ -1758,7 +1758,7 @@ esp_err_t audio_es_tools::record_and_play_test_with_channel_select(uint32_t reco
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seconds, bool loop_playback)
+esp_err_t audio_tools::record_and_playback_test(uint32_t record_duration_seconds, bool loop_playback)
 {
     const bool capture_ready = (es7210_initialized && record_dev != nullptr) ||
                                (es8311_initialized && es8311_has_adc_path() && record_dev == es8311_dev_handle);
@@ -1951,42 +1951,42 @@ esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seco
     return ESP_OK;
 }
 
-esp_codec_dev_handle_t audio_es_tools::get_play_device_handle() const
+esp_codec_dev_handle_t audio_tools::get_play_device_handle() const
 {
     return play_dev;
 }
 
-esp_codec_dev_handle_t audio_es_tools::get_record_device_handle() const
+esp_codec_dev_handle_t audio_tools::get_record_device_handle() const
 {
     return record_dev;
 }
 
-bool audio_es_tools::is_es8311_initialized() const
+bool audio_tools::is_es8311_initialized() const
 {
     return es8311_initialized;
 }
 
-bool audio_es_tools::is_es7210_initialized() const
+bool audio_tools::is_es7210_initialized() const
 {
     return es7210_initialized;
 }
 
-bool audio_es_tools::is_system_initialized() const
+bool audio_tools::is_system_initialized() const
 {
     return system_initialized;
 }
 
-bool audio_es_tools::is_es8311_sleeping() const
+bool audio_tools::is_es8311_sleeping() const
 {
     return es8311_sleeping;
 }
 
-bool audio_es_tools::is_es7210_sleeping() const
+bool audio_tools::is_es7210_sleeping() const
 {
     return es7210_sleeping;
 }
 
-void audio_es_tools::set_i2s_pin_config(gpio_num_t bck_pin, gpio_num_t mck_pin, gpio_num_t data_in_pin, 
+void audio_tools::set_i2s_pin_config(gpio_num_t bck_pin, gpio_num_t mck_pin, gpio_num_t data_in_pin, 
                                         gpio_num_t data_out_pin, gpio_num_t ws_pin, gpio_num_t pa_pin)
 {
     i2s_bck_pin = bck_pin;
@@ -2000,7 +2000,7 @@ void audio_es_tools::set_i2s_pin_config(gpio_num_t bck_pin, gpio_num_t mck_pin, 
              bck_pin, mck_pin, data_in_pin, data_out_pin, ws_pin, pa_pin);
 }
 
-int audio_es_tools::get_available_pcm_count() const
+int audio_tools::get_available_pcm_count() const
 {
     int count = 0;
     
@@ -2014,13 +2014,13 @@ int audio_es_tools::get_available_pcm_count() const
     return count;
 }
 
-const char* audio_es_tools::get_audio_file_name(audio_file_type_t audio_type) const
+const char* audio_tools::get_audio_file_name(audio_file_type_t audio_type) const
 {
     const AudioFileMetadata* meta = find_audio_metadata(audio_type);
     return meta ? meta->filename : "unknown";
 }
 
-bool audio_es_tools::is_audio_file_available(audio_file_type_t audio_type) const
+bool audio_tools::is_audio_file_available(audio_file_type_t audio_type) const
 {
     // 直接在表中查找，如果找到说明该文件已编译（表项由#ifdef控制）
     const AudioFileMetadata* meta = find_audio_metadata(audio_type);
@@ -2031,7 +2031,7 @@ bool audio_es_tools::is_audio_file_available(audio_file_type_t audio_type) const
 // 获取PCM数据和格式参数
 // ============================================================================
 
-esp_err_t audio_es_tools::get_pcm_data_and_format(audio_file_type_t audio_type,
+esp_err_t audio_tools::get_pcm_data_and_format(audio_file_type_t audio_type,
                                                    const uint8_t*& pcm_start,
                                                    size_t& pcm_len,
                                                    uint32_t& file_sample_rate_hz,
@@ -2078,7 +2078,7 @@ esp_err_t audio_es_tools::get_pcm_data_and_format(audio_file_type_t audio_type,
 // 播放音频文件（内部实现）
 // ============================================================================
 
-esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type, bool check_stop_signal, float duration_limit_seconds)
+esp_err_t audio_tools::play_audio_file_impl(audio_file_type_t audio_type, bool check_stop_signal, float duration_limit_seconds)
 {
     // 边界检查
     if (audio_type < 0 || audio_type >= AUDIO_FILE_MAX) {
@@ -2261,7 +2261,7 @@ esp_err_t audio_es_tools::play_audio_file_impl(audio_file_type_t audio_type, boo
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::play_audio_buffer_impl(const uint8_t* buffer, size_t buffer_size, 
+esp_err_t audio_tools::play_audio_buffer_impl(const uint8_t* buffer, size_t buffer_size, 
                                                    uint32_t buffer_sample_rate_hz, audio_channels_t buffer_channels, 
                                                    i2s_data_bit_width_t buffer_bits,
                                                    bool check_stop_signal, float duration_limit_seconds)
@@ -2439,7 +2439,7 @@ esp_err_t audio_es_tools::play_audio_buffer_impl(const uint8_t* buffer, size_t b
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::play_audio_file(audio_file_type_t audio_type, audio_playback_mode_t mode, float duration_limit_seconds)
+esp_err_t audio_tools::play_audio_file(audio_file_type_t audio_type, audio_playback_mode_t mode, float duration_limit_seconds)
 {
     if (mode == AUDIO_PLAYBACK_BLOCKING) {
         return play_audio_file_impl(audio_type, false, duration_limit_seconds);  // 阻塞模式不检查停止信号
@@ -2472,7 +2472,7 @@ esp_err_t audio_es_tools::play_audio_file(audio_file_type_t audio_type, audio_pl
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::play_audio_buffer(const uint8_t* buffer, size_t buffer_size, 
+esp_err_t audio_tools::play_audio_buffer(const uint8_t* buffer, size_t buffer_size, 
                                              uint32_t buffer_sample_rate_hz, audio_channels_t buffer_channels, 
                                              i2s_data_bit_width_t buffer_bits,
                                              audio_playback_mode_t mode, 
@@ -2542,10 +2542,10 @@ esp_err_t audio_es_tools::play_audio_buffer(const uint8_t* buffer, size_t buffer
     return ESP_OK;
 }
 
-void audio_es_tools::playback_task_entry(void* param)
+void audio_tools::playback_task_entry(void* param)
 {
     auto* args = static_cast<playback_task_args*>(param);
-    audio_es_tools* instance = args->instance;
+    audio_tools* instance = args->instance;
     audio_file_type_t audio_type = args->audio_type;
     uint32_t duration_limit_seconds = args->duration_limit_seconds;
     free(args);
@@ -2587,10 +2587,10 @@ void audio_es_tools::playback_task_entry(void* param)
     vTaskDelete(nullptr);
 }
 
-void audio_es_tools::buffer_playback_task_entry(void* param)
+void audio_tools::buffer_playback_task_entry(void* param)
 {
     auto* args = static_cast<buffer_playback_task_args*>(param);
-    audio_es_tools* instance = args->instance;
+    audio_tools* instance = args->instance;
     const uint8_t* buffer = args->buffer;
     size_t buffer_size = args->buffer_size;
     uint32_t buffer_sample_rate_hz = args->buffer_sample_rate_hz;
@@ -2644,7 +2644,7 @@ void audio_es_tools::buffer_playback_task_entry(void* param)
     vTaskDelete(nullptr);
 }
 
-esp_err_t audio_es_tools::stop_async_playback()
+esp_err_t audio_tools::stop_async_playback()
 {
     TaskHandle_t task_to_stop = nullptr;
 
@@ -2692,7 +2692,7 @@ esp_err_t audio_es_tools::stop_async_playback()
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::clear_audio_pipeline(uint32_t silence_duration_ms)
+esp_err_t audio_tools::clear_audio_pipeline(uint32_t silence_duration_ms)
 {
     // 获取互斥锁保护
     if (audio_mutex && xSemaphoreTake(audio_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
@@ -2752,7 +2752,7 @@ esp_err_t audio_es_tools::clear_audio_pipeline(uint32_t silence_duration_ms)
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::set_volume(float volume_value)
+esp_err_t audio_tools::set_volume(float volume_value)
 {
     // 检查音量范围
     if (volume_value < 0.0 || volume_value > 100.0) {
@@ -2776,7 +2776,7 @@ esp_err_t audio_es_tools::set_volume(float volume_value)
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::set_record_gain(float gain)
+esp_err_t audio_tools::set_record_gain(float gain)
 {
     // 检查增益范围（ES7210支持0-66dB）
     if (gain < 0.0 || gain > 66.0) {
@@ -2804,7 +2804,7 @@ esp_err_t audio_es_tools::set_record_gain(float gain)
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::set_audio_levels(float volume, float gain)
+esp_err_t audio_tools::set_audio_levels(float volume, float gain)
 {
     esp_err_t ret_vol = set_volume(volume);
     esp_err_t ret_gain = set_record_gain(gain);
@@ -2824,7 +2824,7 @@ esp_err_t audio_es_tools::set_audio_levels(float volume, float gain)
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::es7210_set_mic_channel_gain(audio_mic_channel_t mic_channels_to_set, es7210_mic_gain_t gain)
+esp_err_t audio_tools::es7210_set_mic_channel_gain(audio_mic_channel_t mic_channels_to_set, es7210_mic_gain_t gain)
 {
     // 检查 ES7210 是否已初始化
     if (!es7210_initialized) {
@@ -2923,7 +2923,7 @@ esp_err_t audio_es_tools::es7210_set_mic_channel_gain(audio_mic_channel_t mic_ch
 
 // set_mic_channels函数已删除，请直接在es7210_init中传入麦克风通道参数
 
-const char* audio_es_tools::get_mic_channels_description(audio_mic_channel_t channels) const
+const char* audio_tools::get_mic_channels_description(audio_mic_channel_t channels) const
 {
     switch (channels) {
         case AUDIO_MIC_NONE:
@@ -2963,7 +2963,7 @@ const char* audio_es_tools::get_mic_channels_description(audio_mic_channel_t cha
     }
 }
 
-bool audio_es_tools::is_mic_channels_valid(audio_mic_channel_t channels) const
+bool audio_tools::is_mic_channels_valid(audio_mic_channel_t channels) const
 {
     // 检查通道值是否在有效范围内（0x00-0x0F）
     if (channels > AUDIO_MIC_CHANNEL_ALL) {
@@ -2974,7 +2974,7 @@ bool audio_es_tools::is_mic_channels_valid(audio_mic_channel_t channels) const
     return true;
 }
 
-int audio_es_tools::count_selected_mics() const
+int audio_tools::count_selected_mics() const
 {
     uint8_t v = static_cast<uint8_t>(mic_channels);
     int cnt = 0;
@@ -2985,7 +2985,7 @@ int audio_es_tools::count_selected_mics() const
     return cnt;
 }
 
-esp_err_t audio_es_tools::record_to_file(const char* filepath, uint32_t record_duration_seconds, size_t chunk_size)
+esp_err_t audio_tools::record_to_file(const char* filepath, uint32_t record_duration_seconds, size_t chunk_size)
 {
     const bool es8311_adc_ready = es8311_initialized && es8311_has_adc_path() && (record_dev == es8311_dev_handle);
     const bool es7210_adc_ready = es7210_initialized;

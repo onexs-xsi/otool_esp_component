@@ -1,11 +1,5 @@
-/*
- * SPDX-FileCopyrightText: 2025 exia
- *
- * SPDX-License-Identifier: MIT
- */
-
-#ifndef __SD_TOOLS_H__
-#define __SD_TOOLS_H__
+#ifndef SD_TOOLS_H
+#define SD_TOOLS_H
 
 #include "esp_err.h"
 #include "esp_vfs_fat.h"
@@ -18,10 +12,9 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <fcntl.h>
-#include <string>
 
 #ifdef __cplusplus
-extern "C" {
+#include <string>
 #endif
 
 // SD卡测试模式枚举
@@ -31,9 +24,41 @@ typedef enum {
     SD_MODE_SPI = 2        // SPI 模式
 } sd_test_mode_t;
 
-#ifdef __cplusplus
-}
+// SD卡挂载点
+#ifndef MOUNT_POINT
+#define MOUNT_POINT "/sdcard"
 #endif
+
+// SD卡引脚定义（可根据硬件配置修改）
+#ifndef SDCARD_PIN_CMD
+#define SDCARD_PIN_CMD  7   // GPIO_NUM_7
+#endif
+
+#ifndef SDCARD_PIN_CLK
+#define SDCARD_PIN_CLK  10  // GPIO_NUM_10
+#endif
+
+#ifndef SDCARD_PIN_D0
+#define SDCARD_PIN_D0   8   // GPIO_NUM_8
+#endif
+
+#ifndef SDCARD_SPI_CS
+#define SDCARD_SPI_CS   50  // GPIO_NUM_50
+#endif
+
+#ifndef SDCARD_SPI_MOSI
+#define SDCARD_SPI_MOSI 7   // GPIO_NUM_7
+#endif
+
+#ifndef SDCARD_SPI_MISO
+#define SDCARD_SPI_MISO 8   // GPIO_NUM_8
+#endif
+
+#ifndef SDCARD_SPI_CLK
+#define SDCARD_SPI_CLK  10  // GPIO_NUM_10
+#endif
+
+#ifdef __cplusplus
 
 /**
  * @brief sd_tools 类
@@ -88,13 +113,6 @@ public:
     sd_tools();
 
     /**
-     * @brief 构造函数（带模式参数）
-     * 
-     * @param mode SD卡工作模式
-     */
-    sd_tools(sd_test_mode_t mode);
-
-    /**
      * @brief 析构函数
      * 
      * 销毁 sd_tools 对象，自动清理资源
@@ -104,11 +122,46 @@ public:
     // === 配置方法 (在初始化前调用) ===
     
     /**
-     * @brief 设置SD卡工作模式
+     * @brief 设置SD卡工作模式 (MMC 1位模式)
      * 
-     * @param mode SD卡工作模式
+     * @param mode 必须是 SD_MODE_MMC_1BIT
+     * @param clk_pin CLK引脚
+     * @param cmd_pin CMD引脚
+     * @param d0_pin D0引脚
+     * @param internal_pullup 是否启用内部上拉
      */
-    void set_mode(sd_test_mode_t mode);
+    void set_mode(sd_test_mode_t mode, gpio_num_t clk_pin, gpio_num_t cmd_pin, gpio_num_t d0_pin, bool internal_pullup = true);
+
+    /**
+     * @brief 设置SD卡工作模式 (MMC 4位模式)
+     * 
+     * @param mode 必须是 SD_MODE_MMC_4BIT
+     * @param clk_pin CLK引脚
+     * @param cmd_pin CMD引脚
+     * @param d0_pin D0引脚
+     * @param d1_pin D1引脚
+     * @param d2_pin D2引脚
+     * @param d3_pin D3引脚
+     * @param internal_pullup 是否启用内部上拉
+     */
+    void set_mode(sd_test_mode_t mode, gpio_num_t clk_pin, gpio_num_t cmd_pin, gpio_num_t d0_pin,
+                  gpio_num_t d1_pin, gpio_num_t d2_pin, gpio_num_t d3_pin, 
+                  bool internal_pullup = true);
+
+    /**
+     * @brief 设置SD卡工作模式 (SPI模式)
+     * 
+     * @param mode 必须是 SD_MODE_SPI
+     * @param cs_pin CS引脚
+     * @param mosi_pin MOSI引脚
+     * @param miso_pin MISO引脚
+     * @param clk_pin CLK引脚
+     * @param host SPI主机设备
+     * @param max_transfer_sz 最大传输大小
+     */
+    void set_mode(sd_test_mode_t mode, gpio_num_t cs_pin, gpio_num_t mosi_pin, gpio_num_t miso_pin, 
+                  gpio_num_t clk_pin, spi_host_device_t host = SPI3_HOST, 
+                  uint32_t max_transfer_sz = 2048);
 
     /**
      * @brief 获取当前工作模式
@@ -153,45 +206,6 @@ public:
      * @param format_if_mount_failed 挂载失败时是否格式化
      */
     void set_filesystem_config(uint16_t max_files, uint32_t allocation_unit_size, bool format_if_mount_failed);
-
-    /**
-     * @brief 设置MMC模式引脚配置
-     * 
-     * @param clk_pin CLK引脚
-     * @param cmd_pin CMD引脚
-     * @param d0_pin D0引脚
-     * @param internal_pullup 是否启用内部上拉
-     */
-    void set_mmc_pins(gpio_num_t clk_pin, gpio_num_t cmd_pin, gpio_num_t d0_pin, bool internal_pullup = true);
-
-    /**
-     * @brief 设置MMC 4位模式引脚配置
-     * 
-     * @param clk_pin CLK引脚
-     * @param cmd_pin CMD引脚
-     * @param d0_pin D0引脚
-     * @param d1_pin D1引脚
-     * @param d2_pin D2引脚
-     * @param d3_pin D3引脚
-     * @param internal_pullup 是否启用内部上拉
-     */
-    void set_mmc_4bit_pins(gpio_num_t clk_pin, gpio_num_t cmd_pin, gpio_num_t d0_pin,
-                          gpio_num_t d1_pin, gpio_num_t d2_pin, gpio_num_t d3_pin, 
-                          bool internal_pullup = true);
-
-    /**
-     * @brief 设置SPI模式引脚配置
-     * 
-     * @param cs_pin CS引脚
-     * @param mosi_pin MOSI引脚
-     * @param miso_pin MISO引脚
-     * @param clk_pin CLK引脚
-     * @param host SPI主机设备
-     * @param max_transfer_sz 最大传输大小
-     */
-    void set_spi_pins(gpio_num_t cs_pin, gpio_num_t mosi_pin, gpio_num_t miso_pin, 
-                     gpio_num_t clk_pin, spi_host_device_t host = SPI3_HOST, 
-                     uint32_t max_transfer_sz = 2048);
 
     // === 初始化和控制方法 ===
     
@@ -304,10 +318,10 @@ public:
      * @brief 综合测试
      * 
      * 包含初始化、文件操作、性能测试的完整测试流程
-     * @param test_size_mb 性能测试大小(MB)
+     * @param test_count 测试文件数量 (默认128)
      * @return esp_err_t 测试结果
      */
-    esp_err_t comprehensive_test(uint32_t test_size_mb = 128);
+    esp_err_t comprehensive_test(uint32_t test_count = 128);
 
     // === 状态查询方法 ===
     
@@ -364,4 +378,6 @@ public:
     static const char* get_mode_description(sd_test_mode_t mode);
 };
 
-#endif // __SD_TOOLS_H__
+#endif
+
+#endif // SD_TOOLS_H

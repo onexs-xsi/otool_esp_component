@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "audio_es_tools.h"
-#include "audio_config.h"
+#include "audio_tools.h"
+#include "audio_es_es7210.h"
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
 #include "esp_codec_dev_defaults.h"
@@ -27,7 +27,7 @@ static inline void _gpio_set_high_z(gpio_num_t pin)
     gpio_pulldown_dis(pin);
 }
 
-esp_err_t audio_es_tools::es7210_init(audio_channels_t channels, audio_mic_channel_t mic_channels, es7210_tdm_mode_t use_tdm)
+esp_err_t audio_tools::es7210_init(audio_channels_t channels, audio_mic_channel_t mic_channels, es7210_tdm_mode_t use_tdm)
 {
     if (es7210_initialized) {
         ESP_LOGW(TAG, "ES7210 already initialized");
@@ -261,7 +261,7 @@ esp_err_t audio_es_tools::es7210_init(audio_channels_t channels, audio_mic_chann
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::es7210_deinit()
+esp_err_t audio_tools::es7210_deinit()
 {
     if (!es7210_initialized) {
         ESP_LOGW(TAG, "ES7210 not initialized");
@@ -289,7 +289,7 @@ esp_err_t audio_es_tools::es7210_deinit()
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::es7210_sleep()
+esp_err_t audio_tools::es7210_sleep()
 {
     if (!es7210_initialized) {
         ESP_LOGE(TAG, "ES7210 not initialized");
@@ -341,7 +341,7 @@ esp_err_t audio_es_tools::es7210_sleep()
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::es7210_set_mic_channel_mute(audio_mic_channel_t mic_channel, bool mute)
+esp_err_t audio_tools::es7210_set_mic_channel_mute(audio_mic_channel_t mic_channel, bool mute)
 {
     // 参数验证：仅允许单一通道
     uint8_t channel_mask = static_cast<uint8_t>(mic_channel);

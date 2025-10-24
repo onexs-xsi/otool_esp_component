@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "audio_es_tools.h"
-#include "audio_config.h"
+#include "audio_tools.h"
+#include "audio_es_es8311.h"
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
 #include "esp_codec_dev_defaults.h"
@@ -27,7 +27,7 @@ static inline void _gpio_set_high_z(gpio_num_t pin)
     gpio_pulldown_dis(pin);
 }
 
-esp_err_t audio_es_tools::es8311_init(audio_channels_t channels, es8311_path_mode_t mode)
+esp_err_t audio_tools::es8311_init(audio_channels_t channels, es8311_path_mode_t mode)
 {
     esp_codec_dec_work_mode_t requested_mode = ESP_CODEC_DEV_WORK_MODE_NONE;
     switch (mode) {
@@ -247,7 +247,7 @@ esp_err_t audio_es_tools::es8311_init(audio_channels_t channels, es8311_path_mod
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::es8311_deinit()
+esp_err_t audio_tools::es8311_deinit()
 {
     if (!es8311_initialized) {
         ESP_LOGW(TAG, "ES8311 not initialized");
@@ -292,7 +292,7 @@ esp_err_t audio_es_tools::es8311_deinit()
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::es8311_sleep()
+esp_err_t audio_tools::es8311_sleep()
 {
     if (!es8311_initialized) {
         ESP_LOGE(TAG, "ES8311 not initialized");

@@ -7,7 +7,7 @@
 // IP2315 power IC helper (class-form) – generic I2C wrapper and basic ops
 // Register map portions implemented per provided datasheet excerpts.
 
-#include "power_ic_ip2315.h"
+#include "ip2315_tools.h"
 
 #include "sdkconfig.h"
 #include "esp_log.h"
@@ -53,16 +53,16 @@ enum : uint8_t {
 	IP2315_REG_CHG_STAT    = 0xC7,
 };
 
-power_ic_ip2315::power_ic_ip2315(uint8_t addr, uint32_t bus_freq_hz)
+ip2315_tools::ip2315_tools(uint8_t addr, uint32_t bus_freq_hz)
 	: _bus(nullptr), _dev(nullptr), _addr(addr), _bus_freq(bus_freq_hz), _initialized(false), _owns_dev(false) {}
 
-power_ic_ip2315::~power_ic_ip2315()
+ip2315_tools::~ip2315_tools()
 {
 	// Ensure resources are released
 	(void)deinit();
 }
 
-esp_err_t power_ic_ip2315::init(i2c_master_bus_handle_t bus)
+esp_err_t ip2315_tools::init(i2c_master_bus_handle_t bus)
 {
 	if (_initialized) {
 		ESP_LOGW(TAG, "IP2315 already initialized @0x%02X", _addr);
@@ -87,7 +87,7 @@ esp_err_t power_ic_ip2315::init(i2c_master_bus_handle_t bus)
 	return ESP_OK;
 }
 
-esp_err_t power_ic_ip2315::init(i2c_master_bus_handle_t bus, i2c_bus_device_handle_t *i2c_device)
+esp_err_t ip2315_tools::init(i2c_master_bus_handle_t bus, i2c_bus_device_handle_t *i2c_device)
 {
 	if (_initialized) {
 		ESP_LOGW(TAG, "IP2315 already initialized @0x%02X", _addr);
@@ -105,7 +105,7 @@ esp_err_t power_ic_ip2315::init(i2c_master_bus_handle_t bus, i2c_bus_device_hand
 	return ESP_OK;
 }
 
-esp_err_t power_ic_ip2315::deinit()
+esp_err_t ip2315_tools::deinit()
 {
 	if (_dev && _owns_dev) {
 		i2c_bus_device_delete(&_dev);
@@ -119,19 +119,19 @@ esp_err_t power_ic_ip2315::deinit()
 
 // --- Low-level helpers ---
 
-esp_err_t power_ic_ip2315::read_reg(uint8_t reg, uint8_t *val) const
+esp_err_t ip2315_tools::read_reg(uint8_t reg, uint8_t *val) const
 {
 	if (!_initialized || _dev == nullptr || val == nullptr) return ESP_ERR_INVALID_STATE;
 	return i2c_bus_read_byte(_dev, reg, val);
 }
 
-esp_err_t power_ic_ip2315::write_reg(uint8_t reg, uint8_t val) const
+esp_err_t ip2315_tools::write_reg(uint8_t reg, uint8_t val) const
 {
 	if (!_initialized || _dev == nullptr) return ESP_ERR_INVALID_STATE;
 	return i2c_bus_write_byte(_dev, reg, val);
 }
 
-esp_err_t power_ic_ip2315::update_bits(uint8_t reg, uint8_t mask, uint8_t value) const
+esp_err_t ip2315_tools::update_bits(uint8_t reg, uint8_t mask, uint8_t value) const
 {
 	if (!_initialized || _dev == nullptr) return ESP_ERR_INVALID_STATE;
 	uint8_t v = 0;
@@ -141,7 +141,7 @@ esp_err_t power_ic_ip2315::update_bits(uint8_t reg, uint8_t mask, uint8_t value)
 	return i2c_bus_write_byte(_dev, reg, v);
 }
 
-esp_err_t power_ic_ip2315::read_u16_be(uint8_t reg_msb, uint16_t &out) const
+esp_err_t ip2315_tools::read_u16_be(uint8_t reg_msb, uint16_t &out) const
 {
 	if (!_initialized || _dev == nullptr) return ESP_ERR_INVALID_STATE;
 	uint8_t hi = 0, lo = 0;
@@ -153,7 +153,7 @@ esp_err_t power_ic_ip2315::read_u16_be(uint8_t reg_msb, uint16_t &out) const
 	return ESP_OK;
 }
 
-esp_err_t power_ic_ip2315::read_reg_safely(uint8_t reg, uint8_t &val) const
+esp_err_t ip2315_tools::read_reg_safely(uint8_t reg, uint8_t &val) const
 {
 	uint8_t tmp = 0;
 	esp_err_t ret = ESP_OK;
@@ -167,7 +167,7 @@ esp_err_t power_ic_ip2315::read_reg_safely(uint8_t reg, uint8_t &val) const
 
 // --- High-level operations (placeholders; wire up with real regs/bits later) ---
 
-esp_err_t power_ic_ip2315::enable_charging(bool enable)
+esp_err_t ip2315_tools::enable_charging(bool enable)
 {
 	// Per datasheet: SYS_CTL1 (0x01) bit0 controls charger enable: 0=disable, 1=enable
 	constexpr uint8_t CHG_EN_MASK = 0x01; // bit0
@@ -178,7 +178,7 @@ esp_err_t power_ic_ip2315::enable_charging(bool enable)
 
 static inline uint8_t clamp6(uint32_t v) { return (uint8_t)((v > 0x3F) ? 0x3F : v); }
 
-esp_err_t power_ic_ip2315::set_charge_current_ma(uint16_t ma, charge_input_profile_t profile, iset_scale_t scale)
+esp_err_t ip2315_tools::set_charge_current_ma(uint16_t ma, charge_input_profile_t profile, iset_scale_t scale)
 {
 	// Ensure using register control
 	esp_err_t ret = ensure_register_current_control();
@@ -209,7 +209,7 @@ esp_err_t power_ic_ip2315::set_charge_current_ma(uint16_t ma, charge_input_profi
 	return write_reg(reg, (uint8_t)(iset6 & 0x3F));
 }
 
-esp_err_t power_ic_ip2315::dump_registers(uint8_t start, uint8_t end) const
+esp_err_t ip2315_tools::dump_registers(uint8_t start, uint8_t end) const
 {
 	if (!_initialized || _dev == nullptr) return ESP_ERR_INVALID_STATE;
 	if (start > end) return ESP_ERR_INVALID_ARG;
@@ -228,11 +228,11 @@ esp_err_t power_ic_ip2315::dump_registers(uint8_t start, uint8_t end) const
 	return ESP_OK;
 }
 
-i2c_bus_device_handle_t power_ic_ip2315::device() const { return _dev; }
-uint8_t power_ic_ip2315::address() const { return _addr; }
-bool power_ic_ip2315::is_initialized() const { return _initialized; }
+i2c_bus_device_handle_t ip2315_tools::device() const { return _dev; }
+uint8_t ip2315_tools::address() const { return _addr; }
+bool ip2315_tools::is_initialized() const { return _initialized; }
 
-esp_err_t power_ic_ip2315::get_status(uint8_t &status) const
+esp_err_t ip2315_tools::get_status(uint8_t &status) const
 {
 	// CHG_STAT @0xC7, bit6: Chg_end (0: charging, 1: full)
 	uint8_t v = 0;
@@ -243,7 +243,15 @@ esp_err_t power_ic_ip2315::get_status(uint8_t &status) const
 	return ret;
 }
 
-esp_err_t power_ic_ip2315::set_5v_bat_current_mode(bool use_constant_bat)
+esp_err_t ip2315_tools::get_fault(uint8_t &fault) const
+{
+	if (!_initialized || _dev == nullptr) return ESP_ERR_INVALID_STATE;
+	fault = 0;
+	ESP_LOGW(TAG, "IP2315 fault register handling not implemented yet");
+	return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t ip2315_tools::set_5v_bat_current_mode(bool use_constant_bat)
 {
 	// For 5V input charging: 0x20[1]=0 selects constant BAT current
 	const uint8_t mask = (uint8_t)(1u << 1);
@@ -252,7 +260,7 @@ esp_err_t power_ic_ip2315::set_5v_bat_current_mode(bool use_constant_bat)
 	return update_bits(IP2315_REG_CHG_MODE0, mask, val);
 }
 
-esp_err_t power_ic_ip2315::configure_ichgset_pin_mode(bool enable_pin)
+esp_err_t ip2315_tools::configure_ichgset_pin_mode(bool enable_pin)
 {
 	// 0x1E[5:3]:
 	//  - 000: disable pin; use register to set charge current (requires 0x74[6]=1)
@@ -276,13 +284,13 @@ esp_err_t power_ic_ip2315::configure_ichgset_pin_mode(bool enable_pin)
 	return ret;
 }
 
-esp_err_t power_ic_ip2315::set_ichgset_pin_mode(bool enable_pin)
+esp_err_t ip2315_tools::set_ichgset_pin_mode(bool enable_pin)
 {
 	ESP_LOGI(TAG, "ICHGSET pin mode: %s", enable_pin ? "enable" : "disable");
 	return configure_ichgset_pin_mode(enable_pin);
 }
 
-esp_err_t power_ic_ip2315::ensure_register_current_control()
+esp_err_t ip2315_tools::ensure_register_current_control()
 {
 	// Force to register current control (0x1E[5:3]=000 and 0x74[6]=1)
 	esp_err_t ret = configure_ichgset_pin_mode(false);

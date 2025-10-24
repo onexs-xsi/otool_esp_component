@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef __POWER_IC_IP2315_H__
-#define __POWER_IC_IP2315_H__
+#ifndef __IP2315_TOOLS_H__
+#define __IP2315_TOOLS_H__
 
 #include <stdint.h>
 #include "esp_err.h"
@@ -21,7 +21,7 @@
  * 说明：寄存器地址与位定义需参考数据手册进行校准。本类先提供通用读写接口与
  *       一些典型高层操作的占位实现，便于后续按手册补齐。
  */
-class power_ic_ip2315 {
+class ip2315_tools {
 public:
 	// 充电输入电压档位（决定写哪个 ISET 寄存器）
 	enum charge_input_profile_t {
@@ -44,8 +44,8 @@ public:
 	 * @param addr I2C 地址（默认 0x75）
 	 * @param bus_freq_hz I2C 频率（默认 400k）
 	 */
-	explicit power_ic_ip2315(uint8_t addr = I2C_IP2315_ADDR, uint32_t bus_freq_hz = 400000);
-	~power_ic_ip2315();
+	explicit ip2315_tools(uint8_t addr = I2C_IP2315_ADDR, uint32_t bus_freq_hz = 400000);
+	~ip2315_tools();
 
 	/**
 	 * @brief 初始化：基于外部 I2C Master Bus 创建设备句柄
@@ -108,5 +108,5 @@ private:
 	bool _owns_dev;
 };
 
-#endif // __POWER_IC_IP2315_H__
+#endif // __IP2315_TOOLS_H__
 

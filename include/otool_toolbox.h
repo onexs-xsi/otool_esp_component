@@ -10,9 +10,9 @@
 #include "esp_err.h"
 #include <stdexcept>
 #include "i2c_bus_tools.h"
-#include "audio_es_tools.h"
+#include "audio_tools.h"
 #include "ir_nec_tools.h"
-#include "esp_sd_tool.h"
+#include "sd_tools.h"
 #include "ic_rx8130.h"
 
 /**
@@ -25,10 +25,10 @@ protected:
 
 public:
     i2c_bus_tools i2c_tools;  ///< I2C总线工具对象
-    audio_es_tools audio_tools; ///< 音频处理工具对象
+    audio_tools audio; ///< 音频处理工具对象
     ir_nec_tools ir_nec; ///< IR NEC 红外工具对象
     sd_tools sd_card; ///< SD卡工具对象
-    ic_rx8130_tools rtc_rx8130; ///< RX8130 RTC工具对象
+    rx8130_tools rtc_rx8130; ///< RX8130 RTC工具对象
 
     /**
      * @brief 构造函数

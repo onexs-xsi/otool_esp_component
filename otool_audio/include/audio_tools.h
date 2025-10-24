@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef __AUDIO_ES_TOOLS_H__
-#define __AUDIO_ES_TOOLS_H__
+#ifndef __AUDIO_TOOLS_H__
+#define __AUDIO_TOOLS_H__
 
 //es8311 and es7210 include
 #include "driver/i2s_std.h"
@@ -28,6 +28,10 @@
 
 // ESP-SR AEC support
 #include "esp_afe_aec.h"
+
+// 芯片设备专用头文件
+#include "../audio_chip_device/audio_es_es8311/audio_es_es8311.h"
+#include "../audio_chip_device/audio_es_es7210/audio_es_es7210.h"
 
 // I2S PIN MAP
 #define I2S_BCLK_PIN       GPIO_NUM_40
@@ -53,13 +57,13 @@
  * 定义可播放的音频文件类型
  */
 typedef enum {
-    AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S = 0,  ///< Candy Wind 1通道 16kHz 16bit 9秒音频文件 (candy_wind_pcm_1ch_16k_16bit_9s.pcm)
-    AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S,     ///< Candy Wind 1通道 44.1kHz 16bit 45.5秒音频文件 (candy_wind_pcm_1ch_44.1k_16bit_45.5s.pcm)
-    AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S,      ///< Candy Wind 2通道 16kHz 16bit 9秒音频文件 (candy_wind_pcm_2ch_16k_16bit_9s.pcm)
-    AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S,     ///< Candy Wind 2通道 44.1kHz 16bit 45.5秒音频文件 (candy_wind_pcm_2ch_44.1k_16bit_45.5s.pcm)
-    AUDIO_FILE_STARTUP_1CH_16K_16B_4S,         ///< 启动音频文件 1通道 16kHz 16bit 4秒 (startup_pcm_1ch_16k_16bit_4s.pcm)
-    AUDIO_FILE_STARTUP_2CH_16K_16B_4S,         ///< 启动音频文件 2通道 16kHz 16bit 4秒 (startup_pcm_2ch_16k_16bit_4s.pcm)
-    AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S,     ///< 440Hz正弦波音频文件 2通道 16kHz 16bit 10秒 (sine_440Hz_pcm_2ch_16k_16bit_10s.pcm)
+    AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S = 0,  ///< candy_wind 1通道 16000Hz 16bit 9.0秒 (candy_wind_pcm_1ch_16k_16bit_9s.pcm)
+    AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S,     ///< candy_wind 1通道 44100Hz 16bit 45.0秒 (candy_wind_pcm_1ch_44.1k_16bit_45s.pcm)
+    AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S,     ///< candy_wind 2通道 16000Hz 16bit 9.0秒 (candy_wind_pcm_2ch_16k_16bit_9s.pcm)
+    AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S,     ///< candy_wind 2通道 44100Hz 16bit 45.0秒 (candy_wind_pcm_2ch_44.1k_16bit_45s.pcm)
+    AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S,     ///< sine_440Hz 2通道 16000Hz 16bit 10.0秒 (sine_440Hz_pcm_2ch_16k_16bit_10s.pcm)
+    AUDIO_FILE_STARTUP_1CH_16K_16B_4S,     ///< startup 1通道 16000Hz 16bit 4.0秒 (startup_pcm_1ch_16k_16bit_4s.pcm)
+    AUDIO_FILE_STARTUP_2CH_16K_16B_4S,     ///< startup 2通道 16000Hz 16bit 4.0秒 (startup_pcm_2ch_16k_16bit_4s.pcm)
     AUDIO_FILE_MAX                             ///< 枚举最大值（用于边界检查）
 } audio_file_type_t;
 
@@ -72,30 +76,6 @@ typedef enum {
     AUDIO_PLAYBACK_BLOCKING = 0, ///< 阻塞播放，函数调用完成后表示播放已结束
     AUDIO_PLAYBACK_ASYNC         ///< 异步播放，立即返回并在后台任务中完成播放
 } audio_playback_mode_t;
-
-/**
- * @brief 音频声道枚举
- * 
- * 定义音频声道配置
- */
-typedef enum {
-    AUDIO_CHANNELS_MONO = 1,     ///< 单声道
-    AUDIO_CHANNELS_STEREO = 2,   ///< 立体声
-    AUDIO_CHANNELS_3CHs = 3,      ///< 3声道
-    AUDIO_CHANNELS_4CHs = 4       ///< 4声道
-} audio_channels_t;
-
-/**
- * @brief ES8311工作路径配置
- *
- * 通过按位组合选择 ES8311 的 ADC/DAC 功能。
- */
-typedef enum {
-    ES8311_MODE_NONE = 0,                 ///< 不启用任何路径（无效配置）
-    ES8311_MODE_DAC = 1 << 0,             ///< 仅启用 DAC（播放）
-    ES8311_MODE_ADC = 1 << 1,             ///< 仅启用 ADC（录音）
-    ES8311_MODE_DAC_AND_ADC = ES8311_MODE_DAC | ES8311_MODE_ADC ///< 同时启用 ADC 与 DAC
-} es8311_path_mode_t;
 
 /**
  * @brief 音频采样率枚举
@@ -114,31 +94,6 @@ typedef enum {
     AUDIO_SAMPLE_RATE_176K4 = 176400, ///< 176.4kHz - 超高保真
     AUDIO_SAMPLE_RATE_192K = 192000   ///< 192kHz - 超高保真专业
 } audio_sample_rate_t;
-
-/**
- * @brief ES7210麦克风通道选择枚举
- * 
- * 定义ES7210 ADC的麦克风输入通道配置
- * 可以组合使用多个通道（使用位或操作）
- */
-typedef enum {
-    AUDIO_MIC_NONE = 0x00,                    ///< 不选择任何麦克风
-    AUDIO_MIC_CHANNEL_1 = 0x01,               ///< 麦克风通道1 (MIC1)
-    AUDIO_MIC_CHANNEL_2 = 0x02,               ///< 麦克风通道2 (MIC2) 
-    AUDIO_MIC_CHANNEL_3 = 0x04,               ///< 麦克风通道3 (MIC3)
-    AUDIO_MIC_CHANNEL_4 = 0x08,               ///< 麦克风通道4 (MIC4)
-    AUDIO_MIC_CHANNEL_12 = 0x03,              ///< 麦克风通道1+2
-    AUDIO_MIC_CHANNEL_13 = 0x05,              ///< 麦克风通道1+3
-    AUDIO_MIC_CHANNEL_14 = 0x09,              ///< 麦克风通道1+4
-    AUDIO_MIC_CHANNEL_23 = 0x06,              ///< 麦克风通道2+3
-    AUDIO_MIC_CHANNEL_24 = 0x0A,              ///< 麦克风通道2+4
-    AUDIO_MIC_CHANNEL_34 = 0x0C,              ///< 麦克风通道3+4
-    AUDIO_MIC_CHANNEL_123 = 0x07,             ///< 麦克风通道1+2+3
-    AUDIO_MIC_CHANNEL_124 = 0x0B,             ///< 麦克风通道1+2+4
-    AUDIO_MIC_CHANNEL_134 = 0x0D,             ///< 麦克风通道1+3+4
-    AUDIO_MIC_CHANNEL_234 = 0x0E,             ///< 麦克风通道2+3+4
-    AUDIO_MIC_CHANNEL_ALL = 0x0F              ///< 所有麦克风通道1+2+3+4
-} audio_mic_channel_t;
 
 /**
  * @brief 录音缓冲拆分结果
@@ -167,39 +122,7 @@ typedef struct {
 } mic_channel_quality_t;
 
 /**
- * @brief ES7210 TDM 模式控制
- */
-typedef enum {
-    ES7210_TDM_DISABLED = 0,  ///< 禁用TDM，使用标准I2S
-    ES7210_TDM_ENABLED = 1    ///< 启用TDM，固定4通道slot
-} es7210_tdm_mode_t;
-
-/**
- * @brief ES7210麦克风增益枚举
- * 
- * 定义ES7210 ADC支持的增益档位
- * 寄存器值直接对应档位序号(0-14)
- */
-typedef enum {
-    ES7210_MIC_GAIN_0DB = 0,        ///< 0dB (寄存器值=0)
-    ES7210_MIC_GAIN_3DB = 1,        ///< 3dB (寄存器值=1)
-    ES7210_MIC_GAIN_6DB = 2,        ///< 6dB (寄存器值=2)
-    ES7210_MIC_GAIN_9DB = 3,        ///< 9dB (寄存器值=3)
-    ES7210_MIC_GAIN_12DB = 4,       ///< 12dB (寄存器值=4)
-    ES7210_MIC_GAIN_15DB = 5,       ///< 15dB (寄存器值=5)
-    ES7210_MIC_GAIN_18DB = 6,       ///< 18dB (寄存器值=6)
-    ES7210_MIC_GAIN_21DB = 7,       ///< 21dB (寄存器值=7)
-    ES7210_MIC_GAIN_24DB = 8,       ///< 24dB (寄存器值=8)
-    ES7210_MIC_GAIN_27DB = 9,       ///< 27dB (寄存器值=9)
-    ES7210_MIC_GAIN_30DB = 10,      ///< 30dB (寄存器值=10, 常用值)
-    ES7210_MIC_GAIN_33DB = 11,      ///< 33dB (寄存器值=11)
-    ES7210_MIC_GAIN_34_5DB = 12,    ///< 34.5dB (寄存器值=12)
-    ES7210_MIC_GAIN_36DB = 13,      ///< 36dB (寄存器值=13)
-    ES7210_MIC_GAIN_37_5DB = 14     ///< 37.5dB (寄存器值=14, 最大增益)
-} es7210_mic_gain_t;
-
-/**
- * @brief audio_es_tools 类
+ * @brief audio_tools 类
  * 
  * 提供ES8311和ES7210音频芯片的操作功能，包括初始化、播放、录音和睡眠管理
  * 
@@ -210,12 +133,12 @@ typedef enum {
  * - 为未来扩展新音频设备提供统一框架
  * 
  * 扩展新设备方法：
- * 1. 创建对应的 audio_es_xxx.cpp 文件
+ * 1. 创建对应的 audio_xxx.cpp 文件
  * 2. 在此类中添加相应的成员变量和初始化函数
  * 3. 确保遵循现有的I2S用户计数管理机制
  * 4. 在audio_system_sleep()中添加对应的睡眠调用
  */
-class audio_es_tools {
+class audio_tools {
 private:
     esp_codec_dev_handle_t play_dev;        ///< 播放设备句柄（ES8311）
     esp_codec_dev_handle_t record_dev;      ///< 录音设备句柄（ES7210或ES8311 ADC）
@@ -270,13 +193,13 @@ private:
     const audio_codec_data_if_t *shared_i2s_data_if = nullptr; ///< 共享的 I2S 数据接口（避免重复创建）
 
     struct playback_task_args {
-        audio_es_tools* instance;
+        audio_tools* instance;
         audio_file_type_t audio_type;
         float duration_limit_seconds;
     };
 
     struct buffer_playback_task_args {
-        audio_es_tools* instance;
+        audio_tools* instance;
         const uint8_t* buffer;
         size_t buffer_size;
         uint32_t buffer_sample_rate_hz;
@@ -327,9 +250,9 @@ public:
     /**
      * @brief 构造函数
      * 
-     * 使用默认引脚配置创建 audio_es_tools 对象
+     * 使用默认引脚配置创建 audio_tools 对象
      */
-    audio_es_tools();
+    audio_tools();
 
     /**
      * @brief 构造函数（带参数）
@@ -341,15 +264,15 @@ public:
      * @param ws_pin I2S WS引脚
      * @param pa_pin 功放使能引脚
      */
-    audio_es_tools(gpio_num_t bck_pin, gpio_num_t mck_pin, gpio_num_t data_in_pin, 
+    audio_tools(gpio_num_t bck_pin, gpio_num_t mck_pin, gpio_num_t data_in_pin, 
                    gpio_num_t data_out_pin, gpio_num_t ws_pin, gpio_num_t pa_pin);
 
     /**
      * @brief 析构函数
      * 
-     * 销毁 audio_es_tools 对象，清理音频资源
+     * 销毁 audio_tools 对象，清理音频资源
      */
-    ~audio_es_tools();
+    ~audio_tools();
 
     /**
      * @brief 初始化 ES8311 音频芯片
@@ -562,10 +485,10 @@ public:
      * @example
      * ```cpp
      * // 录音3秒并播放
-     * audio_es_tools::record_and_play_test(3);
-     * 
-     * // 录音5秒并播放
-     * audio_es_tools::record_and_play_test(5);
+    * audio_tools::record_and_play_test(3);
+    * 
+    * // 录音5秒并播放
+    * audio_tools::record_and_play_test(5);
      * ```
      */
     esp_err_t record_and_play_test(uint32_t record_duration_seconds = 3);
@@ -708,10 +631,10 @@ public:
      * @example
      * ```cpp
      * // 录音并播放两个通道进行对比
-     * audio_es_tools::test_aec_loopback(3, 3);
+    * audio_tools::test_aec_loopback(3, 3);
      * 
      * // 仅录音和分析,不播放
-     * audio_es_tools::test_aec_loopback(5, 0);
+    * audio_tools::test_aec_loopback(5, 0);
      * ```
      */
     esp_err_t test_aec_loopback(uint32_t record_duration_seconds = 3, uint8_t play_channels = 3);
@@ -854,55 +777,6 @@ public:
                            gpio_num_t data_out_pin, gpio_num_t ws_pin, gpio_num_t pa_pin);
 
     /**
-     * @brief 检查PCM Candy Wind 1通道 16kHz文件是否可用
-     * 
-     * @return bool 返回PCM文件的可用状态
-     */
-    bool is_pcm_candy_wind_1ch_16k_available() const;
-
-    /**
-     * @brief 检查PCM Candy Wind 1通道 44.1kHz文件是否可用
-     * 
-     * @return bool 返回PCM文件的可用状态
-     */
-    bool is_pcm_candy_wind_1ch_44k_available() const;
-
-    /**
-     * @brief 检查PCM Candy Wind 2通道 16kHz文件是否可用
-     * 
-     * @return bool 返回PCM文件的可用状态
-     */
-    bool is_pcm_candy_wind_2ch_16k_available() const;
-
-    /**
-     * @brief 检查PCM Candy Wind 2通道 44.1kHz文件是否可用
-     * 
-     * @return bool 返回PCM文件的可用状态
-     */
-    bool is_pcm_candy_wind_2ch_44k_available() const;
-
-    /**
-     * @brief 检查PCM启动音频文件 1通道 16kHz是否可用
-     * 
-     * @return bool 返回PCM启动音频文件的可用状态
-     */
-    bool is_pcm_startup_1ch_16k_available() const;
-
-    /**
-     * @brief 检查PCM启动音频文件 2通道 16kHz是否可用
-     * 
-     * @return bool 返回PCM启动音频文件的可用状态
-     */
-    bool is_pcm_startup_2ch_16k_available() const;
-
-    /**
-     * @brief 检查PCM 440Hz正弦波文件是否可用
-     * 
-     * @return bool 返回PCM 440Hz正弦波文件的可用状态
-     */
-    bool is_pcm_sine_440hz_2ch_16k_16b_10s_available() const;
-
-    /**
      * @brief 获取可用PCM测试文件的数量
      * 
      * @return int 返回可用的PCM测试文件数量
@@ -920,8 +794,15 @@ public:
     /**
      * @brief 检查指定音频文件是否可用
      * 
+     * 统一的音频文件可用性检查接口，替代了之前的 is_pcm_xxx_available() 系列函数。
+     * 
      * @param audio_type 音频文件类型
      * @return bool 返回音频文件的可用状态
+     * 
+     * @note 音频文件命名规范（统一使用 AUDIO_ 前缀）:
+     *       - CMake option: ENABLE_AUDIO_XXX
+     *       - C++ 宏定义: USE_AUDIO_XXX
+     *       - 添加新文件时，只需在 CMakeLists.txt 的 AUDIO_FILE_CONFIGS 列表中添加一行即可
      */
     bool is_audio_file_available(audio_file_type_t audio_type) const;
 
@@ -1174,4 +1055,4 @@ public:
     // const char** get_supported_devices() const;
 };
 
-#endif // __AUDIO_ES_TOOLS_H__
+#endif // __AUDIO_TOOLS_H__
