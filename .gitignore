@@ -53,3 +53,5 @@ dkms.conf
 
 # debug information files
 *.dwo
+otool_audio/esp-sr_仅供代码参考
+otool_audio/esp-dsp_仅供代码参考
