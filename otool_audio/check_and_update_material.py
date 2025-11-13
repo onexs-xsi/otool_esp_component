@@ -705,11 +705,16 @@ class CodeUpdater:
         
         for info in audio_files:
             audio_id = info.macro_name[4:]  # 去掉 "USE_" 前缀
+            if audio_id.startswith("AUDIO_"):
+                config_id = audio_id
+            else:
+                config_id = f"AUDIO_{audio_id}"
+
             default_val = "ON" if info.enabled else "OFF"
             desc = f"{info.base_name} {info.channels}ch {info.sample_rate}Hz {info.duration_sec}s"
-            
+
             config_line = (
-                f'    "AUDIO_{audio_id}:{info.filename}:{default_val}:'
+                f'    "{config_id}:{info.filename}:{default_val}:'
                 f'{info.sample_rate}:{info.channels}:{info.bits}:{desc}"'
             )
             cmake_config.append(config_line)

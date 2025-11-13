@@ -29,6 +29,12 @@
 // ESP-SR AEC support
 #include "esp_afe_aec.h"
 
+// 音频通用类型定义
+#include "audio_types.h"
+
+// 前置声明,避免循环依赖
+class audio_sr_afe;
+
 // 芯片设备专用头文件
 #include "../audio_chip_device/audio_es_es8311/audio_es_es8311.h"
 #include "../audio_chip_device/audio_es_es7210/audio_es_es7210.h"
@@ -192,6 +198,9 @@ private:
     // 共享 I2S 数据接口
     const audio_codec_data_if_t *shared_i2s_data_if = nullptr; ///< 共享的 I2S 数据接口（避免重复创建）
 
+    // ESP-SR AFE 子对象
+    audio_sr_afe* sr_afe_ = nullptr;        ///< ESP-SR AFE 对象指针(用于 AEC 等功能)
+
     struct playback_task_args {
         audio_tools* instance;
         audio_file_type_t audio_type;
@@ -221,12 +230,6 @@ private:
                                       bool check_stop_signal, float duration_limit_seconds); ///< 内部缓冲区播放实现
     static void playback_task_entry(void* param);                ///< 异步播放任务入口
     static void buffer_playback_task_entry(void* param);         ///< 异步缓冲区播放任务入口
-    static void free_channel_split_result(channel_split_result_t& result); ///< 释放拆分结果中的缓冲区
-    static channel_split_result_t split_recorded_channels(const uint8_t* record_buffer,
-                                                          size_t bytes_read,
-                                                          const esp_codec_dev_sample_info_t& fs,
-                                                          bool is_tdm_mode,
-                                                          audio_mic_channel_t mic_channels); ///< 拆分录音缓冲为独立通道
     
     /**
      * @brief 获取指定音频文件的PCM数据和格式参数
@@ -247,6 +250,9 @@ private:
                                        i2s_data_bit_width_t& file_bits);
 
 public:
+    // 声明 audio_sr_afe 为友元类,允许其访问私有辅助函数
+    friend class audio_sr_afe;
+
     /**
      * @brief 构造函数
      * 
@@ -553,6 +559,28 @@ public:
                                                         bool analysis_only = false);
 
     /**
+     * @brief 录制所有启用的麦克风通道并分别保存为 PCM 文件
+     *
+     * 工作流程：
+     * 1. 录制指定时长的多通道原始数据
+     * 2. 调用 split_recorded_channels() 拆分为独立单声道缓冲
+     * 3. 生成通道质量统计并写入 SD/FATFS 文件
+     *
+     * @param record_duration_seconds 录音时长（秒）
+     * @param output_directory 输出目录（如 "/sdcard/logs"），若不存在则自动创建
+     * @param file_prefix 文件名前缀；传入 nullptr 或空串时使用默认前缀 "MIC"
+     * @return esp_err_t
+     *         - ESP_OK：成功写入至少一个通道文件
+     *         - 其他：失败原因（参数错误、初始化失败、内存不足、I/O 失败等）
+     *
+     * @note 未启用长文件名（CONFIG_FATFS_LFN_NONE）时，会自动转换为 8.3 文件名
+     * @note 写入的 PCM 数据为 16-bit 单声道，采样率与当前录音配置一致
+     */
+    esp_err_t record_all_channel_to_files(uint32_t record_duration_seconds,
+                                          const char* output_directory,
+                                          const char* file_prefix = nullptr);
+
+    /**
      * @brief 录音并播放录音内容测试
      * 
      * 使用简洁的实现方式，仿照示例代码结构
@@ -574,70 +602,51 @@ public:
                                               mic_channel_quality_t quality[4]);
 
     /**
-     * @brief AEC（回声消除）测试函数
-     * 
-     * 此函数实现了完整的AEC测试流程：
-     * 1. 同时录制麦克风输入和参考音频（正在播放的音频）
-     * 2. 使用ESP-SR的AEC算法进行回声消除处理
-     * 3. 播放经过AEC处理后的音频，并与原始录音对比
-     * 
-     * 测试场景：在播放音乐的同时说话，AEC会消除播放的音乐回声，只保留说话声音
-     * 
-     * @param record_duration_seconds 录音时长（秒），默认5秒
-     * @param filter_length AEC滤波器长度，推荐值：ESP32P4=4, ESP32C5=2
-     *                      值越大CPU负载越高但回声消除效果越好
-     * @param aec_mode AEC工作模式：
-     *                 - AFE_MODE_LOW_COST: 低功耗模式（适合电池供电设备）
-     *                 - AFE_MODE_HIGH_PERF: 高性能模式（更好的回声消除效果）
-     * @param play_original_audio 是否播放原始录音：
-     *                            - true: 播放原始录音（用于对比效果）
-     *                            - false: 播放AEC处理后的音频
-     * 
-     * @return esp_err_t 返回操作结果
-     *         - ESP_OK: 测试成功
-     *         - ESP_ERR_INVALID_STATE: 音频系统未初始化
-     *         - ESP_ERR_NO_MEM: 内存分配失败
-     *         - 其他: 底层驱动错误
-     * 
-     * @note 使用前确保已调用：
-     *       - audio_system_init()
-     *       - es8311_init()
-     *       - es7210_init()
+     * @brief 将录音缓冲区拆分为独立的麦克风通道
+     *
+     * 根据音频格式和麦克风配置，将交错的录音数据拆分为独立的单声道缓冲区。
+     * 支持标准立体声模式和TDM多通道模式。
+     *
+     * @param record_buffer 原始录音数据缓冲区
+     * @param bytes_read 录音数据字节数
+     * @param fs 音频采样信息（采样率、声道数、位深等）
+     * @param is_tdm_mode 是否为TDM模式
+     * @param mic_channels 启用的麦克风通道掩码
+     * @return channel_split_result_t 拆分结果（包含各通道的独立缓冲区）
+     *
+     * @note 返回的缓冲区需要调用 free_channel_split_result() 释放
+     * @note TDM模式下会自动处理8位到16位的转换
      */
-    esp_err_t aec_test(uint32_t record_duration_seconds = 5, int filter_length = 4, 
-                       afe_mode_t aec_mode = AFE_MODE_LOW_COST, bool play_original_audio = false);
+    static channel_split_result_t split_recorded_channels(const uint8_t* record_buffer,
+                                                          size_t bytes_read,
+                                                          const esp_codec_dev_sample_info_t& fs,
+                                                          bool is_tdm_mode,
+                                                          audio_mic_channel_t mic_channels);
 
     /**
-     * @brief 测试AEC硬件回采功能
-     * 
-     * 此函数用于验证ES7210的硬件AEC回采是否正常工作。
-     * 功能：
-     * - 同时读取CH1(麦克风)和CH3(回采)
-     * - 分析两个通道的音频数据特征（RMS、峰值、零值率等）
-     * - 可选择性播放各通道数据进行听觉验证
-     * - 提供详细诊断信息
-     * 
-     * @param record_duration_seconds 录音时长（秒），默认3秒
-     * @param play_channels 播放选项：0=不播放, 1=仅麦克风, 2=仅回采, 3=两者都播放
-     * @return esp_err_t 返回操作结果
-     *         - ESP_OK: 测试成功
-     *         - ESP_ERR_INVALID_STATE: 音频系统未初始化或未启用硬件AEC
-     *         - ESP_ERR_NO_MEM: 内存分配失败
-     * 
-     * @note 要求:
-     *       - ES7210必须使用AUDIO_MIC_CHANNEL_13初始化(CH1+CH3)
-     *       - audio_system_init必须配置为AUDIO_CHANNELS_STEREO
-     * 
+     * @brief 释放通道拆分结果中分配的缓冲区
+     *
+     * 释放 split_recorded_channels() 返回的 channel_split_result_t 中分配的所有内存。
+     * 此函数会检查并释放所有非空的 mic_buffers 指针。
+     *
+     * @param result 要释放的拆分结果引用
+     *
+     * @note 调用后 result 中的所有 mic_buffers 指针将被设置为 nullptr
+     * @note 安全调用：即使 result.status != ESP_OK 也可以安全调用
+     *
      * @example
      * ```cpp
-     * // 录音并播放两个通道进行对比
-    * audio_tools::test_aec_loopback(3, 3);
-     * 
-     * // 仅录音和分析,不播放
-    * audio_tools::test_aec_loopback(5, 0);
+     * channel_split_result_t result = audio_tools::split_recorded_channels(...);
+     * if (result.status == ESP_OK) {
+     *     // 使用 result.mic_buffers[0], result.mic_buffers[1] 等
+     * }
+     * audio_tools::free_channel_split_result(result);  // 使用完毕后释放
      * ```
      */
-    esp_err_t test_aec_loopback(uint32_t record_duration_seconds = 3, uint8_t play_channels = 3);
+    static void free_channel_split_result(channel_split_result_t& result);
+
+    // [已移除] 旧版 AEC 测试接口 aec_test()/test_aec_loopback() 已迁移到 audio_sr_afe 类。
+    // 请使用 get_sr_afe()->aec_init()/aec_test_loopback()/aec_test() 进行 AEC 相关测试。
 
     /**
      * @brief 将录音数据保存到指定文件
@@ -1029,6 +1038,25 @@ public:
      *         - false: ES7210 使用标准模式（MONO 或 STEREO）
      */
     bool is_es7210_tdm_mode() const { return es7210_use_tdm; }
+
+    /**
+     * @brief 获取 ESP-SR AFE 对象
+     * 
+     * 用于访问 AEC (回声消除) 等 ESP-SR 音频前端功能。
+     * 对象会在首次调用时自动创建。
+     * 
+     * @return audio_sr_afe* ESP-SR AFE 对象指针,失败返回 nullptr
+     * 
+     * @example
+     * ```cpp
+     * audio_sr_afe* afe = audio.get_sr_afe();
+     * if (afe) {
+     *     afe->aec_init(AUDIO_MIC_CHANNEL_1, AUDIO_MIC_CHANNEL_3, 4, AFE_MODE_LOW_COST);
+     *     afe->aec_test_loopback(5);
+     * }
+     * ```
+     */
+    audio_sr_afe* get_sr_afe();
 
     // ========== 未来扩展接口示例 ==========
     // 为接入新的音频设备预留的接口框架

@@ -5,6 +5,7 @@
  */
 
 #include "audio_tools.h"
+#include "audio_sr_afe.h"
 #include "driver/i2s_std.h"
 #if SOC_I2S_SUPPORTS_TDM
 #include "driver/i2s_tdm.h"
@@ -22,6 +23,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <math.h>
+#include <cctype>
 
 // ============================================================================
 // 音频文件嵌入声明 - 使用统一命名规范
@@ -651,6 +653,9 @@ audio_tools::audio_tools()
     // 初始化默认麦克风通道配置
     mic_channels = AUDIO_MIC_CHANNEL_12;
     playback_task_handle = nullptr;
+    
+    // ESP-SR AFE 对象稍后按需创建
+    sr_afe_ = nullptr;
 }
 
 // 构造函数（带参数）
@@ -693,6 +698,9 @@ audio_tools::audio_tools(gpio_num_t bck_pin, gpio_num_t mck_pin, gpio_num_t data
     // 初始化默认麦克风通道配置
     mic_channels = AUDIO_MIC_CHANNEL_123;
     playback_task_handle = nullptr;
+    
+    // ESP-SR AFE 对象稍后按需创建
+    sr_afe_ = nullptr;
 }
 
 // 析构函数
@@ -705,6 +713,13 @@ audio_tools::~audio_tools()
         }
     }
     ESP_LOGI(TAG, "audio_tools object destroyed");
+    
+    // 先清理 ESP-SR AFE 对象
+    if (sr_afe_) {
+        delete sr_afe_;
+        sr_afe_ = nullptr;
+    }
+    
     // 清理音频资源
     audio_system_deinit();
     
@@ -1755,6 +1770,315 @@ esp_err_t audio_tools::record_and_play_test_with_channel_select(uint32_t record_
     }
 
     ESP_LOGI(TAG, "=== Channel Select Test Completed ===");
+    return ESP_OK;
+}
+
+esp_err_t audio_tools::record_all_channel_to_files(uint32_t record_duration_seconds,
+                                                   const char* output_directory,
+                                                   const char* file_prefix)
+{
+    if (!es7210_initialized) {
+        ESP_LOGE(TAG, "ES7210 not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!record_dev) {
+        ESP_LOGE(TAG, "Record device not available");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (record_duration_seconds == 0) {
+        ESP_LOGE(TAG, "Record duration must be greater than zero");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!output_directory || output_directory[0] == '\0') {
+        ESP_LOGE(TAG, "Output directory is empty");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const char* prefix_arg = (file_prefix && file_prefix[0] != '\0') ? file_prefix : "MIC";
+
+    const uint8_t enabled_mask = static_cast<uint8_t>(mic_channels);
+    if (enabled_mask == 0) {
+        ESP_LOGE(TAG, "No microphone channels enabled");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_codec_dev_sample_info_t fs = {};
+    fs.sample_rate = static_cast<uint32_t>(sample_rate);
+    fs.bits_per_sample = static_cast<uint32_t>(bits_per_sample);
+
+    const bool is_tdm_mode = es7210_use_tdm;
+    if (is_tdm_mode) {
+        fs.channel = rx_tdm_slot_count ? rx_tdm_slot_count : 4;
+    } else {
+        fs.channel = (rx_channels == AUDIO_CHANNELS_MONO) ? 1 : 2;
+    }
+
+    if (fs.sample_rate == 0 || fs.bits_per_sample == 0 || fs.channel == 0) {
+        ESP_LOGE(TAG, "Invalid audio format: sr=%u, bits=%u, ch=%u",
+                 fs.sample_rate, fs.bits_per_sample, fs.channel);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const size_t bytes_per_sample = (fs.bits_per_sample >> 3);
+    if (bytes_per_sample == 0) {
+        ESP_LOGE(TAG, "bits_per_sample %u results in zero byte samples", fs.bits_per_sample);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint64_t buffer_size_64 = static_cast<uint64_t>(fs.sample_rate) * fs.channel * bytes_per_sample * record_duration_seconds;
+    if (buffer_size_64 == 0 || buffer_size_64 > SIZE_MAX) {
+        ESP_LOGE(TAG, "Requested recording size invalid or too large: %llu bytes",
+                 static_cast<unsigned long long>(buffer_size_64));
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    size_t buffer_size = static_cast<size_t>(buffer_size_64);
+
+    ESP_LOGI(TAG, "=== Record All Channels (%lu s) ===", record_duration_seconds);
+    ESP_LOGI(TAG, "Format: %u Hz, %u bits, %u channels (%s)",
+             fs.sample_rate, fs.bits_per_sample, fs.channel,
+             is_tdm_mode ? "TDM" : "Standard");
+    ESP_LOGI(TAG, "Buffer size: %zu bytes (%.2f KB)", buffer_size, buffer_size / 1024.0f);
+
+    uint8_t* record_buffer = static_cast<uint8_t*>(malloc(buffer_size));
+    if (!record_buffer) {
+        size_t free_heap = esp_get_free_heap_size();
+        ESP_LOGE(TAG, "Failed to allocate recording buffer (%zu bytes, free %zu bytes)", buffer_size, free_heap);
+        return ESP_ERR_NO_MEM;
+    }
+
+    memset(record_buffer, 0, buffer_size);
+
+    const size_t BLOCK_SIZE = 512;
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(record_duration_seconds * 1000 + 500);
+    TickType_t start_tick = xTaskGetTickCount();
+    size_t bytes_read = 0;
+    size_t last_progress = 0;
+    esp_err_t read_result = ESP_OK;
+
+    while (bytes_read < buffer_size) {
+        size_t remaining = buffer_size - bytes_read;
+        size_t to_read = (remaining > BLOCK_SIZE) ? BLOCK_SIZE : remaining;
+
+        read_result = esp_codec_dev_read(record_dev, record_buffer + bytes_read, static_cast<int>(to_read));
+        if (read_result != ESP_OK) {
+            ESP_LOGE(TAG, "Record read error at %zu/%zu bytes: %s",
+                     bytes_read, buffer_size, esp_err_to_name(read_result));
+            break;
+        }
+
+        bytes_read += to_read;
+
+        size_t progress = (bytes_read * 100) / buffer_size;
+        if (progress >= last_progress + 25) {
+            ESP_LOGI(TAG, "Recording progress: %zu%%", progress);
+            last_progress = progress;
+        }
+
+        if ((xTaskGetTickCount() - start_tick) > timeout_ticks) {
+            ESP_LOGW(TAG, "Recording timeout reached at %zu/%zu bytes", bytes_read, buffer_size);
+            break;
+        }
+    }
+
+    TickType_t end_tick = xTaskGetTickCount();
+    uint32_t elapsed_ms = pdTICKS_TO_MS(end_tick - start_tick);
+
+    if (read_result != ESP_OK && bytes_read == 0) {
+        free(record_buffer);
+        return read_result;
+    }
+
+    if (bytes_read == 0) {
+        ESP_LOGE(TAG, "No audio captured");
+        free(record_buffer);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Recording finished: %zu bytes in %.2f s", bytes_read, elapsed_ms / 1000.0f);
+
+    channel_split_result_t split_result = split_recorded_channels(
+        record_buffer,
+        bytes_read,
+        fs,
+        is_tdm_mode,
+        mic_channels);
+
+    free(record_buffer);
+    record_buffer = nullptr;
+
+    if (split_result.status != ESP_OK) {
+        ESP_LOGE(TAG, "Channel splitting failed: %s", esp_err_to_name(split_result.status));
+        free_channel_split_result(split_result);
+        return split_result.status;
+    }
+
+    mic_channel_quality_t channel_quality[4] = {};
+    compute_split_channel_quality(split_result, channel_quality);
+
+    ESP_LOGI(TAG, "=== Channel Quality Summary ===");
+    for (int mic_index = 0; mic_index < 4; ++mic_index) {
+        const mic_channel_quality_t& q = channel_quality[mic_index];
+        if (!q.available) {
+            continue;
+        }
+
+        ESP_LOGI(TAG, "  MIC%u -> samples:%zu rms:%.1f dB peak:[%d,%d] zero:%.1f%% clip:%.2f%%",
+                 mic_index + 1,
+                 q.sample_count,
+                 q.rms_db,
+                 q.min_value,
+                 q.max_value,
+                 q.zero_percent,
+                 q.clipped_percent);
+    }
+
+    std::string base_dir(output_directory);
+    for (char& c : base_dir) {
+        if (c == '\\') {
+            c = '/';
+        }
+    }
+    if (!base_dir.empty() && (base_dir.back() != '/' && base_dir.back() != '\\')) {
+        base_dir.push_back('/');
+    }
+
+    std::string dir_probe = base_dir;
+    if (!dir_probe.empty() && dir_probe.back() != '/') {
+        dir_probe.push_back('/');
+    }
+    dir_probe += "probe.tmp";
+
+    esp_err_t dir_status = ensure_parent_directories(dir_probe.c_str());
+    if (dir_status != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to prepare output directory %s", output_directory);
+        free_channel_split_result(split_result);
+        return dir_status;
+    }
+
+    // Remove probe filename, we just needed directories
+    if (!dir_probe.empty()) {
+        size_t pos = dir_probe.find_last_of('/');
+        if (pos != std::string::npos) {
+            base_dir = dir_probe.substr(0, pos + 1);
+        }
+    }
+
+#if defined(CONFIG_FATFS_LFN_NONE)
+    std::string prefix_str(prefix_arg);
+    auto sanitize_token = [](const std::string& input) {
+        std::string token;
+        token.reserve(input.size());
+        for (char c : input) {
+            if (std::isalnum(static_cast<unsigned char>(c))) {
+                token.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+            } else if (c == '_' || c == '-') {
+                token.push_back('_');
+            }
+        }
+        if (token.empty()) {
+            token = "REC";
+        }
+        return token;
+    };
+
+    std::string token = sanitize_token(prefix_str);
+    auto make_short_name = [&](const std::string& suffix) {
+        std::string base = token;
+        if (base.size() > 3) {
+            base = base.substr(0, 3);
+        }
+        std::string result = base + suffix;
+        if (result.size() > 8) {
+            result = result.substr(0, 8);
+        }
+        return result;
+    };
+#else
+    auto normalize_prefix = [](const char* raw) {
+        std::string cleaned;
+        for (const char* p = raw; p && *p; ++p) {
+            unsigned char c = static_cast<unsigned char>(*p);
+            if (std::isalnum(c)) {
+                cleaned.push_back(static_cast<char>(c));
+            } else if (*p == '_' || *p == '-') {
+                cleaned.push_back('_');
+            }
+        }
+        if (cleaned.empty()) {
+            cleaned = "record";
+        }
+        return cleaned;
+    };
+
+    std::string token = normalize_prefix(prefix_arg);
+#endif
+
+    esp_err_t write_status = ESP_OK;
+    size_t files_written = 0;
+
+    for (int mic_index = 0; mic_index < 4 && write_status == ESP_OK; ++mic_index) {
+        int16_t* samples = split_result.mic_buffers[mic_index];
+        const mic_channel_quality_t& quality = channel_quality[mic_index];
+
+        if (!samples || !quality.available || quality.sample_count == 0) {
+            continue;
+        }
+
+        std::string file_path;
+#if defined(CONFIG_FATFS_LFN_NONE)
+        std::string suffix = "M" + std::to_string(mic_index + 1);
+        file_path = base_dir + make_short_name(suffix) + ".PCM";
+#else
+        file_path = base_dir + token + "_mic_ch" + std::to_string(mic_index + 1) + ".pcm";
+#endif
+
+        write_status = ensure_parent_directories(file_path.c_str());
+        if (write_status != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to create directories for %s", file_path.c_str());
+            break;
+        }
+
+        FILE* file = fopen(file_path.c_str(), "wb");
+        if (!file) {
+            ESP_LOGE(TAG, "Failed to open %s: %s", file_path.c_str(), strerror(errno));
+            write_status = ESP_FAIL;
+            break;
+        }
+
+        size_t written = fwrite(samples, sizeof(int16_t), quality.sample_count, file);
+        fflush(file);
+        fclose(file);
+
+        if (written != quality.sample_count) {
+            ESP_LOGE(TAG, "Incomplete write for %s (%zu/%zu samples)",
+                     file_path.c_str(), written, quality.sample_count);
+            remove(file_path.c_str());
+            write_status = ESP_FAIL;
+            break;
+        }
+
+        ++files_written;
+        float channel_duration = static_cast<float>(quality.sample_count) / static_cast<float>(fs.sample_rate);
+        ESP_LOGI(TAG, "Saved MIC%u to %s (%.2f s, rms %.1f dB)",
+                 mic_index + 1, file_path.c_str(), channel_duration, quality.rms_db);
+    }
+
+    free_channel_split_result(split_result);
+
+    if (write_status != ESP_OK) {
+        return write_status;
+    }
+
+    if (files_written == 0) {
+        ESP_LOGW(TAG, "No channel data available to write");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Recorded %zu channel files to %s", files_written, output_directory);
     return ESP_OK;
 }
 
@@ -3109,3 +3433,18 @@ esp_err_t audio_tools::record_to_file(const char* filepath, uint32_t record_dura
     ESP_LOGI(TAG, "Recording saved successfully: %s (%zu bytes)", filepath, bytes_written);
     return ESP_OK;
 }
+// ========== ESP-SR AFE �ӿ� ==========
+
+audio_sr_afe* audio_tools::get_sr_afe()
+{
+    if (!sr_afe_) {
+        sr_afe_ = new (std::nothrow) audio_sr_afe(this);
+        if (!sr_afe_) {
+            ESP_LOGE(TAG, "Failed to allocate audio_sr_afe object");
+            return nullptr;
+        }
+        ESP_LOGI(TAG, "audio_sr_afe object created");
+    }
+    return sr_afe_;
+}
+
