@@ -17,6 +17,7 @@ i2c_bus_tools::i2c_bus_tools()
     i2c_scl_pin = I2C_MASTER_SCL_IO;
     i2c_frequency = I2C_MASTER_FREQ_HZ;
     i2c_port_num = I2C_NUM_0;  // 默认使用 I2C_NUM_0
+    i2c_pullup = I2C_PULLUP_ENABLE;  // 默认启用内部上拉
     initialized = false;
     
     // 初始化设备句柄数组
@@ -34,6 +35,7 @@ i2c_bus_tools::i2c_bus_tools(gpio_num_t sda_pin, gpio_num_t scl_pin, uint32_t fr
     i2c_scl_pin = scl_pin;
     i2c_frequency = frequency;
     i2c_port_num = I2C_NUM_0;  // 默认使用 I2C_NUM_0
+    i2c_pullup = I2C_PULLUP_ENABLE;  // 默认启用内部上拉
     initialized = false;
     
     // 初始化设备句柄数组
@@ -51,6 +53,7 @@ i2c_bus_tools::i2c_bus_tools(gpio_num_t sda_pin, gpio_num_t scl_pin, uint32_t fr
     i2c_scl_pin = scl_pin;
     i2c_frequency = frequency;
     i2c_port_num = port_num;
+    i2c_pullup = I2C_PULLUP_ENABLE;  // 默认启用内部上拉
     initialized = false;
     
     // 初始化设备句柄数组
@@ -64,96 +67,65 @@ i2c_bus_tools::~i2c_bus_tools()
 {
     ESP_LOGI(TAG, "i2c_bus_tools object destroyed");
     // 清理I2C资源
-    unregister_i2c_bus_device();
+    deinit();
 }
 
-esp_err_t i2c_bus_tools::register_i2c_bus_device(i2c_bus_handle_t bus, uint32_t speed, gpio_num_t i2c_sda_pin, gpio_num_t i2c_scl_pin)
+/**
+ * @brief 初始化 I2C 总线（主要实现）
+ */
+esp_err_t i2c_bus_tools::init(void)
 {
-    // Initialize I2C bus    
+    if (g_i2c_bus != NULL) {
+        ESP_LOGW(TAG, "I2C bus already initialized");
+        return ESP_OK;  // 已经初始化，返回成功
+    }
+
+    ESP_LOGI(TAG, "Initializing I2C bus: SDA=%d, SCL=%d, Freq=%lu, Port=%d, Pullup=%d", 
+             i2c_sda_pin, i2c_scl_pin, i2c_frequency, i2c_port_num, i2c_pullup);
+
+    // 配置 I2C 总线
     i2c_config_t conf = {
         .mode = I2C_MODE_MASTER,
         .sda_io_num = i2c_sda_pin,
         .scl_io_num = i2c_scl_pin,
-        .sda_pullup_en = GPIO_PULLUP_DISABLE,
-        .scl_pullup_en = GPIO_PULLUP_DISABLE,
+        .sda_pullup_en = (i2c_pullup == I2C_PULLUP_ENABLE) ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
+        .scl_pullup_en = (i2c_pullup == I2C_PULLUP_ENABLE) ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
         .master = {
-            .clk_speed = speed,
+            .clk_speed = i2c_frequency,
         },
         .clk_flags = 0
     };
+
+    // 创建 I2C 总线
     g_i2c_bus = i2c_bus_create(i2c_port_num, &conf);
     if (g_i2c_bus == NULL) {
         ESP_LOGE(TAG, "Failed to create I2C bus on port %d", i2c_port_num);
         return ESP_FAIL;
     }
-    else {
-        ESP_LOGI(TAG, "I2C bus created successfully on port %d", i2c_port_num);
-        initialized = true;
-        return ESP_OK;
-    }
-}
 
-esp_err_t i2c_bus_tools::register_i2c_bus_device(void)
-{
-    if (g_i2c_bus != NULL) {
-        ESP_LOGW(TAG, "I2C bus already registered");
-        return ESP_OK;  // 已经注册，返回成功
-    }
-
-    ESP_LOGI(TAG, "Registering I2C bus with SDA=%d, SCL=%d, Freq=%lu, Port=%d", 
-             i2c_sda_pin, i2c_scl_pin, i2c_frequency, i2c_port_num);
-
-    // Register I2C bus device
-    esp_err_t ret = register_i2c_bus_device(g_i2c_bus, i2c_frequency, i2c_sda_pin, i2c_scl_pin);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register I2C bus device");
-        return ret;
-    }
-    
-    // Initialize I2C devices
+    // 初始化设备句柄数组
     for (int i = 0; i < I2C_SCAN_ADDR_NUM; i++) {
         i2c_device_all[i] = NULL;
     }
-    
-    ESP_LOGI(TAG, "I2C bus and devices initialized successfully");
+
+    initialized = true;
+    ESP_LOGI(TAG, "I2C bus initialized successfully on port %d", i2c_port_num);
     return ESP_OK;
 }
 
-esp_err_t i2c_bus_tools::unregister_i2c_bus_device(i2c_bus_handle_t bus)
-{
-    if (bus == NULL) {
-        ESP_LOGE(TAG, "I2C bus handle is NULL");
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    // Unregister all I2C devices FIRST (to drop references to the bus)
-    for (int i = 0; i < I2C_SCAN_ADDR_NUM; i++) {
-        if (i2c_device_all[i] != NULL) {
-            i2c_bus_device_delete(&i2c_device_all[i]);
-            i2c_device_all[i] = NULL;
-        }
-    }
-
-    // Then unregister I2C bus
-    esp_err_t ret = i2c_bus_delete(&bus);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "i2c_bus_delete returned %s (bus may still be referenced elsewhere)", esp_err_to_name(ret));
-    }
-    g_i2c_bus = NULL;
-
-    ESP_LOGI(TAG, "I2C devices unregistered, bus delete attempted");
-    initialized = false;
-    return ret;
-}
-
-esp_err_t i2c_bus_tools::unregister_i2c_bus_device(void)
+/**
+ * @brief 反初始化 I2C 总线（主要实现）
+ */
+esp_err_t i2c_bus_tools::deinit(void)
 {
     if (g_i2c_bus == NULL) {
-        ESP_LOGW(TAG, "I2C bus not registered");
+        ESP_LOGW(TAG, "I2C bus not initialized");
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Delete all I2C devices FIRST
+    ESP_LOGI(TAG, "Deinitializing I2C bus on port %d", i2c_port_num);
+
+    // 首先删除所有 I2C 设备
     for (int i = 0; i < I2C_SCAN_ADDR_NUM; i++) {
         if (i2c_device_all[i] != NULL) {
             i2c_bus_device_delete(&i2c_device_all[i]);
@@ -161,16 +133,32 @@ esp_err_t i2c_bus_tools::unregister_i2c_bus_device(void)
         }
     }
 
-    // Then delete I2C bus
+    // 然后删除 I2C 总线
     esp_err_t ret = i2c_bus_delete(&g_i2c_bus);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "i2c_bus_delete returned %s (bus may still be referenced elsewhere)", esp_err_to_name(ret));
     }
     g_i2c_bus = NULL;
-
-    ESP_LOGI(TAG, "I2C devices unregistered, bus delete attempted");
     initialized = false;
+
+    ESP_LOGI(TAG, "I2C bus deinitialized");
     return ret;
+}
+
+/**
+ * @brief 注册 I2C 总线设备（已弃用，调用 init()）
+ */
+esp_err_t i2c_bus_tools::register_i2c_bus_device(void)
+{
+    return init();
+}
+
+/**
+ * @brief 注销 I2C 总线设备（已弃用，调用 deinit()）
+ */
+esp_err_t i2c_bus_tools::unregister_i2c_bus_device(void)
+{
+    return deinit();
 }
 
 esp_err_t i2c_bus_tools::scan_and_add_i2c_bus_devices(void)
@@ -248,6 +236,18 @@ void i2c_bus_tools::set_i2c_config(gpio_num_t sda_pin, gpio_num_t scl_pin, uint3
     i2c_frequency = frequency;
     i2c_port_num = port_num;
     ESP_LOGI(TAG, "I2C config updated: SDA=%d, SCL=%d, Freq=%lu, Port=%d", sda_pin, scl_pin, frequency, port_num);
+}
+
+void i2c_bus_tools::set_i2c_config(gpio_num_t sda_pin, gpio_num_t scl_pin, uint32_t frequency, i2c_port_t port_num, 
+                                   i2c_pullup_enable_t pullup)
+{
+    i2c_sda_pin = sda_pin;
+    i2c_scl_pin = scl_pin;
+    i2c_frequency = frequency;
+    i2c_port_num = port_num;
+    i2c_pullup = pullup;
+    ESP_LOGI(TAG, "I2C config updated: SDA=%d, SCL=%d, Freq=%lu, Port=%d, Pullup=%d", 
+             sda_pin, scl_pin, frequency, port_num, pullup);
 }
 
 i2c_port_t i2c_bus_tools::get_i2c_port_num(void) const

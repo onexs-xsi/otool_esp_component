@@ -30,6 +30,14 @@
 #define I2C_SCAN_ADDR_NUM 128
 
 /**
+ * @brief I2C 内部上拉使能枚举
+ */
+typedef enum {
+    I2C_PULLUP_DISABLE = 0,  ///< 禁用内部上拉
+    I2C_PULLUP_ENABLE = 1,   ///< 启用内部上拉
+} i2c_pullup_enable_t;
+
+/**
  * @brief i2c_bus_tools 类
  * 
  * 提供 I2C 总线操作的功能，包括设备注册、扫描和管理
@@ -42,6 +50,7 @@ private:
     gpio_num_t i2c_scl_pin;                                      ///< I2C SCL 引脚
     uint32_t i2c_frequency;                                      ///< I2C 频率
     i2c_port_t i2c_port_num;                                     ///< I2C 端口号
+    i2c_pullup_enable_t i2c_pullup;                              ///< 内部上拉使能
     bool initialized;                                            ///< 初始化状态
 
 public:
@@ -79,36 +88,35 @@ public:
     ~i2c_bus_tools();
 
     /**
+     * @brief 初始化I2C总线设备（使用已配置的参数）
+     * 
+     * @return esp_err_t 返回操作结果
+     */
+    esp_err_t init(void);
+
+    /**
+     * @brief 反初始化I2C总线设备，释放所有资源
+     * 
+     * @return esp_err_t 返回操作结果
+     */
+    esp_err_t deinit(void);
+
+    /**
      * @brief 注册I2C总线设备（使用默认参数）
      * 
+     * @deprecated 此函数已弃用，请使用 init() 代替
      * @return esp_err_t 返回操作结果
      */
+    [[deprecated("请使用 init() 代替")]]
     esp_err_t register_i2c_bus_device(void);
-
-    /**
-     * @brief 注册I2C总线设备（使用指定参数）
-     * 
-     * @param bus I2C总线句柄
-     * @param speed I2C速度
-     * @param i2c_sda_pin SDA引脚
-     * @param i2c_scl_pin SCL引脚
-     * @return esp_err_t 返回操作结果
-     */
-    esp_err_t register_i2c_bus_device(i2c_bus_handle_t bus, uint32_t speed, gpio_num_t i2c_sda_pin, gpio_num_t i2c_scl_pin);
-
-    /**
-     * @brief 注销I2C总线设备
-     * 
-     * @param bus I2C总线句柄
-     * @return esp_err_t 返回操作结果
-     */
-    esp_err_t unregister_i2c_bus_device(i2c_bus_handle_t bus);
 
     /**
      * @brief 注销I2C总线设备（使用内部句柄）
      * 
+     * @deprecated 此函数已弃用，请使用 deinit() 代替
      * @return esp_err_t 返回操作结果
      */
+    [[deprecated("请使用 deinit() 代替")]]
     esp_err_t unregister_i2c_bus_device(void);
 
     /**
@@ -158,6 +166,18 @@ public:
      * @param port_num I2C端口号
      */
     void set_i2c_config(gpio_num_t sda_pin, gpio_num_t scl_pin, uint32_t frequency, i2c_port_t port_num);
+
+    /**
+     * @brief 设置I2C参数（包含端口号和上拉配置）
+     * 
+     * @param sda_pin SDA引脚
+     * @param scl_pin SCL引脚
+     * @param frequency I2C频率
+     * @param port_num I2C端口号
+     * @param pullup 内部上拉使能（SDA和SCL同时配置）
+     */
+    void set_i2c_config(gpio_num_t sda_pin, gpio_num_t scl_pin, uint32_t frequency, i2c_port_t port_num, 
+                        i2c_pullup_enable_t pullup);
 
     /**
      * @brief 获取当前I2C端口号
