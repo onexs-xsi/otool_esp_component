@@ -19,15 +19,15 @@ static const char *TAG = "esp_sd_tool";
 
 sd_tools::sd_tools() 
     : initialized(false), mounted(false), card(nullptr), current_mode(SD_MODE_MMC_1BIT),
-      mode(SD_MODE_MMC_1BIT), mount_point("/sdcard"), max_freq_khz(20000),
-      max_files(5), allocation_unit_size(16 * 1024), format_if_mount_failed(false),
+      mode(SD_MODE_MMC_1BIT), mount_point("/sdcard"), max_freq_khz(40000),  // 优化: 40MHz (从 20MHz 提升)
+      max_files(5), allocation_unit_size(32 * 1024), format_if_mount_failed(false),  // 优化: 32KB 分配单元 (从 16KB 提升)
       mmc_clk_pin(GPIO_NUM_NC), mmc_cmd_pin(GPIO_NUM_NC), mmc_d0_pin(GPIO_NUM_NC),
       mmc_d1_pin(GPIO_NUM_NC), mmc_d2_pin(GPIO_NUM_NC), mmc_d3_pin(GPIO_NUM_NC),
       mmc_internal_pullup(true),
       spi_cs_pin(GPIO_NUM_NC), spi_mosi_pin(GPIO_NUM_NC), spi_miso_pin(GPIO_NUM_NC),
       spi_clk_pin(GPIO_NUM_NC), spi_host(SPI3_HOST), spi_max_transfer_sz(2048)
 {
-    ESP_LOGD(TAG, "sd_tools constructor called");
+    ESP_LOGD(TAG, "sd_tools constructor called with performance-optimized defaults");
 }
 
 sd_tools::~sd_tools()
@@ -342,7 +342,11 @@ esp_err_t sd_tools::init_spi_mode()
     
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = spi_host;
-    host.max_freq_khz = max_freq_khz;
+    // SPI 模式使用更保守的频率（最大 20MHz），40MHz 对 SPI 模式太快
+    host.max_freq_khz = (max_freq_khz > 20000) ? 20000 : max_freq_khz;
+    if (max_freq_khz > 20000) {
+        ESP_LOGW(TAG, "SPI mode: limiting frequency from %lu kHz to 20000 kHz for stability", max_freq_khz);
+    }
 
     spi_bus_config_t bus_cfg = {
         .mosi_io_num = spi_mosi_pin,
@@ -551,7 +555,7 @@ esp_err_t sd_tools::performance_test(uint32_t test_size_mb, const char* test_fil
 esp_err_t sd_tools::write_performance_test(uint32_t test_size_mb, const char* test_filepath, size_t chunk_size)
 {
     ESP_LOGI(TAG, "Starting %lu MB write performance test", test_size_mb);
-    ESP_LOGI(TAG, "Test file path: %s", test_filepath);
+    ESP_LOGI(TAG, "Test file path: %s, chunk size: %zu bytes", test_filepath, chunk_size);
     
     // 删除可能存在的旧文件
     remove(test_filepath);
@@ -592,19 +596,26 @@ esp_err_t sd_tools::write_performance_test(uint32_t test_size_mb, const char* te
     
     uint64_t start_time = esp_timer_get_time();
     bool success = true;
+    uint32_t last_report_percent = 0;
 
     for (uint32_t i = 0; i < max_counts && success; i++) {
         ssize_t written = write(fd, buffer, chunk_size);
         if (written != chunk_size) {
-            ESP_LOGE(TAG, "Write error at chunk %lu", i);
+            ESP_LOGE(TAG, "Write error at chunk %lu (wrote %ld bytes, expected %zu)", i, (long)written, chunk_size);
             success = false;
             result = ESP_FAIL;
-        } else if ((i + 1) % 1000 == 0) {
-            ESP_LOGI(TAG, "Write progress: %lu/%lu chunks", i + 1, max_counts);
+        } else {
+            // 优化：按百分比进度报告（减少日志频率）
+            uint32_t percent = (i + 1) * 100 / max_counts;
+            if (percent >= last_report_percent + 10) {
+                ESP_LOGI(TAG, "Write progress: %lu%%", percent);
+                last_report_percent = percent;
+            }
         }
     }
 
     if (success) {
+        // 性能关键：只在最后 fsync 一次
         fsync(fd);
         uint64_t end_time = esp_timer_get_time();
         uint64_t total_time_ms = (end_time - start_time) / 1000;
@@ -653,15 +664,21 @@ esp_err_t sd_tools::read_performance_test(const char* test_filepath, size_t chun
     uint64_t start_time = esp_timer_get_time();
     bool success = true;
     esp_err_t result = ESP_OK;
+    uint32_t last_report_percent = 0;
 
     for (uint32_t i = 0; i < max_counts && success; i++) {
         ssize_t read_bytes = read(fd, buffer, chunk_size);
         if (read_bytes != chunk_size) {
-            ESP_LOGE(TAG, "Read error at chunk %lu", i);
+            ESP_LOGE(TAG, "Read error at chunk %lu (read %ld bytes, expected %zu)", i, (long)read_bytes, chunk_size);
             success = false;
             result = ESP_FAIL;
-        } else if ((i + 1) % 1000 == 0) {
-            ESP_LOGI(TAG, "Read progress: %lu/%lu chunks", i + 1, max_counts);
+        } else {
+            // 优化：按百分比进度报告（减少日志频率）
+            uint32_t percent = (i + 1) * 100 / max_counts;
+            if (percent >= last_report_percent + 10) {
+                ESP_LOGI(TAG, "Read progress: %lu%%", percent);
+                last_report_percent = percent;
+            }
         }
     }
 

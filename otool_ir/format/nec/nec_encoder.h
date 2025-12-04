@@ -1,11 +1,13 @@
 /*
  * SPDX-FileCopyrightText: 2021-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2025 exia
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
 
 #include <stdint.h>
+
 #include "driver/rmt_encoder.h"
 
 #ifdef __cplusplus

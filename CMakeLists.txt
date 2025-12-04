@@ -18,7 +18,7 @@ set(AUDIO_FILE_CONFIGS
     "AUDIO_CANDY_WIND_2CH_44K_16BIT_45S:candy_wind_pcm_2ch_44.1k_16bit_45s.pcm:OFF:44100:2:16:candy_wind 2ch 44100Hz 45.0s"
     "AUDIO_SINE_440HZ_2CH_16K_16BIT_10S:sine_440Hz_pcm_2ch_16k_16bit_10s.pcm:OFF:16000:2:16:sine_440Hz 2ch 16000Hz 10.0s"
     "AUDIO_STARTUP_1CH_16K_16BIT_4S:startup_pcm_1ch_16k_16bit_4s.pcm:OFF:16000:1:16:startup 1ch 16000Hz 4.0s"
-    "AUDIO_STARTUP_2CH_16K_16BIT_4S:startup_pcm_2ch_16k_16bit_4s.pcm:OFF:16000:2:16:startup 2ch 16000Hz 4.0s"
+    "AUDIO_STARTUP_2CH_16K_16BIT_4S:startup_pcm_2ch_16k_16bit_4s.pcm:ON:16000:2:16:startup 2ch 16000Hz 4.0s"
 )
 # 动态构建EMBED_FILES列表和编译定义
 set(EMBED_FILE_LIST "")
@@ -55,8 +55,13 @@ set(TOOLBOX_SRCS
     "otool_audio/audio_sr_afe.cpp"
     "otool_audio/audio_remix_tools.cpp"
     "otool_i2c_bus/i2c_bus_tools.cpp"
-    "otool_ir_nec/ir_nec_encoder.c"
-    "otool_ir_nec/ir_nec_tools.cpp"
+    "otool_ir/ir_encoder.cpp"
+    "otool_ir/ir_decoder.cpp"
+    "otool_ir/format/nec/nec_encoder.cpp"
+    "otool_ir/format/nec/nec_decoder.cpp"
+    "otool_ir/format/rc5/rc5_decoder.cpp"
+    "otool_ir/format/rc5/rc5_encoder.cpp"
+    "otool_ir/ir_tools.cpp"
     "otool_power_ic/ip2315_tools.cpp"
     "otool_sd/sd_tools.cpp"
     "otool_ic_rx8130/rx8130_tools.cpp"
@@ -73,7 +78,9 @@ if(EMBED_FILE_LIST)
                                      "otool_bmi270/BMM150_SensorAPI"
                                      "otool_i2c_bus/include"
                                      "otool_ic_rx8130/include"
-                                     "otool_ir_nec/include"
+                                     "otool_ir/include"
+                                     "otool_ir/format/nec"
+                                     "otool_ir/format/rc5"
                                      "otool_power_ic/include"
                                      "otool_sd/include"
                         REQUIRES driver esp_driver_i2c i2c_bus esp_codec_dev fatfs sdmmc esp_timer esp-sr esp-dsp
@@ -87,7 +94,8 @@ else()
                                      "otool_bmi270/BMM150_SensorAPI"
                                      "otool_i2c_bus/include"
                                      "otool_ic_rx8130/include"
-                                     "otool_ir_nec/include"
+                                     "otool_ir/include"
+                                     "otool_ir/format/nec"
                                      "otool_power_ic/include"
                                      "otool_sd/include"
                         REQUIRES driver esp_driver_i2c i2c_bus esp_codec_dev fatfs sdmmc esp_timer esp-sr esp-dsp)

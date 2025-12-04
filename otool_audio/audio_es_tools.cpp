@@ -1758,7 +1758,9 @@ esp_err_t audio_es_tools::record_and_play_test_with_channel_select(uint32_t reco
     return ESP_OK;
 }
 
-esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seconds, bool loop_playback)
+esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seconds,
+                                                   bool loop_playback,
+                                                   audio_mic_channel_t target_mic_channel)
 {
     const bool capture_ready = (es7210_initialized && record_dev != nullptr) ||
                                (es8311_initialized && es8311_has_adc_path() && record_dev == es8311_dev_handle);
@@ -1771,184 +1773,293 @@ esp_err_t audio_es_tools::record_and_playback_test(uint32_t record_duration_seco
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGI(TAG, "=== Record and playback test (%lu seconds, loop: %s) ===", 
-             record_duration_seconds, loop_playback ? "YES" : "NO");
-    
-    // 获取当前音频格式信息（使用录音设备的声道配置）
-    esp_codec_dev_sample_info_t fs = {};
-    fs.sample_rate = (uint32_t)this->sample_rate;
-    fs.channel = (this->rx_channels == AUDIO_CHANNELS_MONO) ? 1 : 2;
-    fs.bits_per_sample = (uint32_t)this->bits_per_sample;
-        
-    // 计算缓冲区大小
-    size_t bytes_per_sample = (fs.bits_per_sample >> 3);
-    size_t record_bytes = (size_t)fs.sample_rate * fs.channel * bytes_per_sample * record_duration_seconds;
-    uint8_t *data = (uint8_t *)malloc(record_bytes);
-    if (data == NULL) {
-        size_t free_heap = esp_get_free_heap_size();
-        size_t required_kb = (record_bytes + 1023) / 1024;
-        size_t free_kb = (free_heap + 1023) / 1024;
-        size_t missing_kb = (free_heap < record_bytes) ? (required_kb - free_kb) : 0;
-
-        ESP_LOGE(TAG, "Failed to allocate memory for recording");
-        ESP_LOGE(TAG, "Required: %zu bytes (%zu KB), Free: %zu bytes (%zu KB), Missing: %zu KB",
-                record_bytes, required_kb, free_heap, free_kb, missing_kb);
-        return ESP_ERR_NO_MEM;
+    if (record_duration_seconds == 0) {
+        ESP_LOGE(TAG, "Record duration must be greater than zero");
+        return ESP_ERR_INVALID_ARG;
     }
-    
-    int buffer_size = (int)record_bytes;
-    const size_t BLOCK_SIZE = 512; // 使用固定块大小
-    const TickType_t timeout_ticks = pdMS_TO_TICKS(record_duration_seconds * 1000 + 300);
 
-    if (loop_playback) {
-        ESP_LOGI(TAG, "Starting record-playback loop mode (each cycle: record %lu sec -> play %lu sec)...", 
-                 record_duration_seconds, record_duration_seconds);
-        
-        // 录音-播放循环模式
-        int cycle_count = 0;
-        while (true) {
-            cycle_count++;
-            ESP_LOGI(TAG, "=== Cycle #%d START ===", cycle_count);
-            
-            // 清零缓冲区
-            memset(data, 0, record_bytes);
-            
-            // 录音阶段
-            ESP_LOGI(TAG, "Cycle #%d: Recording %lu seconds... (buffer: %d bytes)", 
-                     cycle_count, record_duration_seconds, buffer_size);
-            
-            TickType_t start_time = xTaskGetTickCount();
-            size_t bytes_read = 0;
-            
-            while (bytes_read < record_bytes) {
-                // 计算本次读取的块大小
-                size_t read_size = (record_bytes - bytes_read > BLOCK_SIZE) ? BLOCK_SIZE : (record_bytes - bytes_read);
-                
-                esp_err_t ret = esp_codec_dev_read(record_dev, data + bytes_read, (int)read_size);
-                if (ret != ESP_OK) {
-                    ESP_LOGE(TAG, "Cycle #%d recording failed: %s", cycle_count, esp_err_to_name(ret));
-                    free(data);
-                    return ESP_FAIL;
-                }
-                
-                bytes_read += read_size;
-                
-                // 检查是否超时
-                if ((xTaskGetTickCount() - start_time) > timeout_ticks) {
-                    ESP_LOGW(TAG, "Cycle #%d record timeout reached, stopping early", cycle_count);
+    const bool is_tdm_mode = es7210_use_tdm;
+    const audio_mic_channel_t enabled_mics = mic_channels;
+
+    auto is_single_mic = [](audio_mic_channel_t mic) {
+        uint8_t value = static_cast<uint8_t>(mic);
+        return value == 0x01 || value == 0x02 || value == 0x04 || value == 0x08;
+    };
+
+    uint8_t selected_channel_index = 0;
+    audio_mic_channel_t effective_target = target_mic_channel;
+
+    if (is_tdm_mode) {
+        if (enabled_mics == AUDIO_MIC_NONE) {
+            ESP_LOGE(TAG, "No microphone channels enabled for TDM mode");
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        if (effective_target == AUDIO_MIC_NONE) {
+            bool found = false;
+            for (uint8_t idx = 0; idx < 4; ++idx) {
+                if (static_cast<uint8_t>(enabled_mics) & (1u << idx)) {
+                    selected_channel_index = idx;
+                    effective_target = static_cast<audio_mic_channel_t>(1u << idx);
+                    found = true;
                     break;
                 }
             }
-            
-            ESP_LOGI(TAG, "Cycle #%d: Recording completed, bytes read: %zu", cycle_count, bytes_read);
-            
-            // 录音和播放之间的短暂间隔
-            vTaskDelay(pdMS_TO_TICKS(200));
-            
-            // 播放阶段
-            ESP_LOGI(TAG, "Cycle #%d: Playing recorded audio...", cycle_count);
-            
-            // 使用 play_audio_buffer 播放录音，支持自适应格式
-            esp_err_t write_ret = play_audio_buffer(
+
+            if (!found) {
+                ESP_LOGE(TAG, "Failed to auto-select TDM microphone channel (mask=0x%02X)",
+                         static_cast<uint8_t>(enabled_mics));
+                return ESP_ERR_INVALID_STATE;
+            }
+
+            ESP_LOGI(TAG, "TDM auto-selected MIC%u for playback", selected_channel_index + 1);
+        } else {
+            if (!is_single_mic(effective_target)) {
+                ESP_LOGE(TAG, "TDM mode requires single mic selection, got 0x%02X",
+                         static_cast<uint8_t>(effective_target));
+                return ESP_ERR_INVALID_ARG;
+            }
+
+            uint8_t mask = static_cast<uint8_t>(effective_target);
+            if (!(mask & static_cast<uint8_t>(enabled_mics))) {
+                ESP_LOGE(TAG, "Selected MIC (0x%02X) not enabled (mask=0x%02X)",
+                         mask,
+                         static_cast<uint8_t>(enabled_mics));
+                return ESP_ERR_INVALID_ARG;
+            }
+
+            switch (effective_target) {
+                case AUDIO_MIC_CHANNEL_1:
+                    selected_channel_index = 0;
+                    break;
+                case AUDIO_MIC_CHANNEL_2:
+                    selected_channel_index = 1;
+                    break;
+                case AUDIO_MIC_CHANNEL_3:
+                    selected_channel_index = 2;
+                    break;
+                case AUDIO_MIC_CHANNEL_4:
+                    selected_channel_index = 3;
+                    break;
+                default:
+                    ESP_LOGE(TAG, "Unsupported mic channel selection 0x%02X",
+                             static_cast<uint8_t>(effective_target));
+                    return ESP_ERR_INVALID_ARG;
+            }
+        }
+    } else if (target_mic_channel != AUDIO_MIC_NONE) {
+        ESP_LOGW(TAG, "Standard I2S mode ignores target_mic_channel (0x%02X)",
+                 static_cast<uint8_t>(target_mic_channel));
+    }
+
+    esp_codec_dev_sample_info_t fs = {};
+    fs.sample_rate = static_cast<uint32_t>(sample_rate);
+    fs.bits_per_sample = static_cast<uint32_t>(bits_per_sample);
+
+    if (fs.sample_rate == 0 || fs.bits_per_sample == 0) {
+        ESP_LOGE(TAG, "Invalid audio format configuration (sr=%u, bits=%u)",
+                 fs.sample_rate,
+                 fs.bits_per_sample);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (is_tdm_mode) {
+        fs.channel = rx_tdm_slot_count ? rx_tdm_slot_count : 4;
+    } else {
+        fs.channel = (rx_channels == AUDIO_CHANNELS_MONO) ? 1 : 2;
+    }
+
+    if (fs.channel == 0) {
+        ESP_LOGE(TAG, "Invalid channel configuration (mode=%s)", is_tdm_mode ? "TDM" : "STD");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const size_t bytes_per_sample = fs.bits_per_sample >> 3;
+    if (bytes_per_sample == 0) {
+        ESP_LOGE(TAG, "bits_per_sample %u produces zero-sized samples", fs.bits_per_sample);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint64_t bytes_needed = static_cast<uint64_t>(fs.sample_rate) * fs.channel * bytes_per_sample * record_duration_seconds;
+    if (bytes_needed == 0 || bytes_needed > SIZE_MAX) {
+        ESP_LOGE(TAG, "Requested recording buffer too large: %llu bytes",
+                 static_cast<unsigned long long>(bytes_needed));
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    size_t record_bytes = static_cast<size_t>(bytes_needed);
+    uint8_t* data = static_cast<uint8_t*>(malloc(record_bytes));
+    if (!data) {
+        size_t free_heap = esp_get_free_heap_size();
+        ESP_LOGE(TAG, "Failed to allocate recording buffer (%zu bytes, free %zu bytes)",
+                 record_bytes,
+                 free_heap);
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "=== Record-playback test (%lu s, loop: %s, mode: %s) ===",
+             record_duration_seconds,
+             loop_playback ? "YES" : "NO",
+             is_tdm_mode ? "TDM" : "STD");
+
+    if (is_tdm_mode) {
+        ESP_LOGI(TAG, "Enabled MIC mask: 0x%02X, target MIC%u",
+                 static_cast<uint8_t>(enabled_mics),
+                 selected_channel_index + 1);
+    }
+
+    const size_t block_size = 512;
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(record_duration_seconds * 1000 + 500);
+
+    auto run_cycle = [&](int cycle_index) -> esp_err_t {
+        memset(data, 0, record_bytes);
+
+        ESP_LOGI(TAG, "Cycle #%d: Recording %lu seconds... (buffer %zu bytes)",
+                 cycle_index,
+                 record_duration_seconds,
+                 record_bytes);
+
+        TickType_t start_tick = xTaskGetTickCount();
+        size_t bytes_read = 0;
+
+        while (bytes_read < record_bytes) {
+            size_t to_read = (record_bytes - bytes_read > block_size) ? block_size : (record_bytes - bytes_read);
+            esp_err_t ret = esp_codec_dev_read(record_dev, data + bytes_read, static_cast<int>(to_read));
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Cycle #%d: Record read failed at %zu bytes: %s",
+                         cycle_index,
+                         bytes_read,
+                         esp_err_to_name(ret));
+                return ret;
+            }
+
+            bytes_read += to_read;
+
+            if ((xTaskGetTickCount() - start_tick) > timeout_ticks) {
+                ESP_LOGW(TAG, "Cycle #%d: Record timeout reached at %zu/%zu bytes",
+                         cycle_index,
+                         bytes_read,
+                         record_bytes);
+                break;
+            }
+        }
+
+        if (bytes_read == 0) {
+            ESP_LOGE(TAG, "Cycle #%d: No audio captured", cycle_index);
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        float approx_duration = static_cast<float>(bytes_read) /
+                                static_cast<float>(fs.sample_rate * fs.channel * bytes_per_sample);
+        ESP_LOGI(TAG, "Cycle #%d: Recording completed (bytes=%zu, approx %.2f s)",
+                 cycle_index,
+                 bytes_read,
+                 approx_duration);
+
+        vTaskDelay(pdMS_TO_TICKS(200));
+
+        esp_err_t playback_status = ESP_OK;
+
+        if (is_tdm_mode) {
+            channel_split_result_t split_result = split_recorded_channels(
+                data,
+                bytes_read,
+                fs,
+                true,
+                enabled_mics);
+
+            if (split_result.status != ESP_OK) {
+                ESP_LOGE(TAG, "Cycle #%d: Channel split failed: %s",
+                         cycle_index,
+                         esp_err_to_name(split_result.status));
+                free_channel_split_result(split_result);
+                return split_result.status;
+            }
+
+            mic_channel_quality_t quality[4] = {};
+            compute_split_channel_quality(split_result, quality);
+            const mic_channel_quality_t& target_quality = quality[selected_channel_index];
+
+            if (!target_quality.available || target_quality.sample_count == 0) {
+                ESP_LOGE(TAG, "Cycle #%d: Target MIC%u has no samples",
+                         cycle_index,
+                         selected_channel_index + 1);
+                free_channel_split_result(split_result);
+                return ESP_ERR_INVALID_STATE;
+            }
+
+            ESP_LOGI(TAG, "Cycle #%d: MIC%u stats -> samples:%zu rms:%.1f dB peak:[%d,%d]",
+                     cycle_index,
+                     selected_channel_index + 1,
+                     target_quality.sample_count,
+                     target_quality.rms_db,
+                     target_quality.min_value,
+                     target_quality.max_value);
+
+            playback_status = play_audio_buffer(
+                reinterpret_cast<const uint8_t*>(split_result.mic_buffers[selected_channel_index]),
+                target_quality.sample_count * sizeof(int16_t),
+                fs.sample_rate,
+                AUDIO_CHANNELS_MONO,
+                I2S_DATA_BIT_WIDTH_16BIT,
+                AUDIO_PLAYBACK_BLOCKING);
+
+            free_channel_split_result(split_result);
+        } else {
+            playback_status = play_audio_buffer(
                 data,
                 bytes_read,
                 fs.sample_rate,
                 (fs.channel == 1) ? AUDIO_CHANNELS_MONO : AUDIO_CHANNELS_STEREO,
-                (i2s_data_bit_width_t)fs.bits_per_sample,
-                AUDIO_PLAYBACK_BLOCKING
-            );
-            
-            if (write_ret != ESP_OK) {
-                ESP_LOGE(TAG, "Cycle #%d playback failed: %s", cycle_count, esp_err_to_name(write_ret));
-                // 播放失败不退出循环，继续下一轮录音
-            } else {
-                ESP_LOGI(TAG, "Cycle #%d: Playback completed -> bytes played: %zu", cycle_count, bytes_read);
-            }
-            
-            // 清理音频管道，避免循环间的音频残留
-            esp_err_t clear_ret = clear_audio_pipeline(50);
-            if (clear_ret != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to clear audio pipeline in cycle #%d", cycle_count);
-            }
-            
-            ESP_LOGI(TAG, "=== Cycle #%d COMPLETED ===", cycle_count);
-            
-            // 循环间隔
-            vTaskDelay(pdMS_TO_TICKS(500));
-            
-            // 这里可以添加退出条件，比如检查按键或其他信号
-            // 为了演示，我们执行3个录音-播放循环后自动退出
-            // if (cycle_count >= 3) {
-            //     ESP_LOGI(TAG, "Auto-stop after %d record-playback cycles for demonstration", cycle_count);
-            //     break;
-            // }
+                static_cast<i2s_data_bit_width_t>(fs.bits_per_sample),
+                AUDIO_PLAYBACK_BLOCKING);
         }
-        
-        ESP_LOGI(TAG, "Record-playback loop completed (%d cycles)", cycle_count);
-    } else {
-        // 单次录音播放模式
-        ESP_LOGI(TAG, "Single record-playback mode");
-        
-        // 清零缓冲区
-        memset(data, 0, record_bytes);
-        
-        ESP_LOGI(TAG, "Start recording %lu seconds... (buffer: %d bytes)", record_duration_seconds, buffer_size);
-            
-        // 录音阶段 - 使用固定块大小循环读取
-        TickType_t start_time = xTaskGetTickCount();
-        size_t bytes_read = 0;
-        
-        while (bytes_read < record_bytes) {
-            // 计算本次读取的块大小
-            size_t read_size = (record_bytes - bytes_read > BLOCK_SIZE) ? BLOCK_SIZE : (record_bytes - bytes_read);
-            
-            esp_err_t ret = esp_codec_dev_read(record_dev, data + bytes_read, (int)read_size);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Recording failed: %s", esp_err_to_name(ret));
-                free(data);
-                return ESP_FAIL;
-            }
-            
-            bytes_read += read_size;
-            
-            // 检查是否超时
-            if ((xTaskGetTickCount() - start_time) > timeout_ticks) {
-                ESP_LOGW(TAG, "Record timeout reached, stopping early");
-                break;
-            }
-        }
-        ESP_LOGI(TAG, "Recording completed, bytes read: %zu", bytes_read);
 
-        // 播放录音内容
-        ESP_LOGI(TAG, "Playing recorded audio once...");
-        
-        // 使用 play_audio_buffer 播放录音，支持自适应格式
-        esp_err_t write_ret = play_audio_buffer(
-            data,
-            bytes_read,
-            fs.sample_rate,
-            (fs.channel == 1) ? AUDIO_CHANNELS_MONO : AUDIO_CHANNELS_STEREO,
-            (i2s_data_bit_width_t)fs.bits_per_sample,
-            AUDIO_PLAYBACK_BLOCKING
-        );
-        
-        if (write_ret != ESP_OK) {
-            ESP_LOGE(TAG, "Playback failed: %s", esp_err_to_name(write_ret));
-        } else {
-            ESP_LOGI(TAG, "Playback completed successfully -> bytes played: %zu", bytes_read);
+        if (playback_status != ESP_OK) {
+            ESP_LOGE(TAG, "Cycle #%d: Playback failed: %s",
+                     cycle_index,
+                     esp_err_to_name(playback_status));
+            return playback_status;
         }
-        
-        esp_err_t clear_ret = clear_audio_pipeline(80);
+
+        ESP_LOGI(TAG, "Cycle #%d: Playback completed");
+
+        esp_err_t clear_ret = clear_audio_pipeline(is_tdm_mode ? 120 : (loop_playback ? 50 : 80));
         if (clear_ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to clear audio pipeline in record_and_playback_test");
+            ESP_LOGW(TAG, "Cycle #%d: Failed to clear audio pipeline: %s",
+                     cycle_index,
+                     esp_err_to_name(clear_ret));
         }
-    }
-        
-    // 释放内存
+
+        return ESP_OK;
+    };
+
+    int cycle_index = 0;
+    esp_err_t overall_status = ESP_OK;
+
+    do {
+        cycle_index++;
+        ESP_LOGI(TAG, "=== Cycle #%d START ===", cycle_index);
+
+        overall_status = run_cycle(cycle_index);
+        if (overall_status != ESP_OK) {
+            break;
+        }
+
+        ESP_LOGI(TAG, "=== Cycle #%d COMPLETED ===", cycle_index);
+
+        if (loop_playback) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+    } while (loop_playback);
+
     free(data);
-    
-    ESP_LOGI(TAG, "=== Record and playback test completed ===");
-    return ESP_OK;
+
+    if (overall_status == ESP_OK) {
+        ESP_LOGI(TAG, "=== Record and playback test completed ===");
+    }
+
+    return overall_status;
 }
 
 esp_codec_dev_handle_t audio_es_tools::get_play_device_handle() const

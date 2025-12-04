@@ -585,12 +585,17 @@ public:
      * 
      * 使用简洁的实现方式，仿照示例代码结构
      * @param record_duration_seconds 录音时长（秒）
-     * @param loop_playback 是否循环录音播放：
-     *                      false - 单次录音播放模式（录音N秒->播放录音内容）
-     *                      true  - 循环录音播放模式（录音N秒->播放N秒->录音N秒->播放N秒...）
+    * @param loop_playback 是否循环录音播放：
+    *                      false - 单次录音播放模式（录音N秒->播放录音内容）
+    *                      true  - 循环录音播放模式（录音N秒->播放N秒->录音N秒->播放N秒...）
+    * @param target_mic_channel 目标麦克风通道：
+    *                      - TDM模式下：指定要播放/分析的麦克风，AUDIO_MIC_NONE 表示自动选择第一个启用的通道
+    *                      - 标准I2S模式：忽略此参数，直接基于当前声道配置录音/播放
      * @return esp_err_t 返回操作结果
      */
-    esp_err_t record_and_playback_test(uint32_t record_duration_seconds = 5, bool loop_playback = false);
+    esp_err_t record_and_playback_test(uint32_t record_duration_seconds = 5,
+                                bool loop_playback = false,
+                                audio_mic_channel_t target_mic_channel = AUDIO_MIC_NONE);
 
     /**
      * @brief 计算拆分后四个通道的质量指标
