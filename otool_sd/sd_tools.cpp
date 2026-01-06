@@ -19,8 +19,8 @@ static const char *TAG = "esp_sd_tool";
 
 sd_tools::sd_tools() 
     : initialized(false), mounted(false), card(nullptr), current_mode(SD_MODE_MMC_1BIT),
-      mode(SD_MODE_MMC_1BIT), mount_point("/sdcard"), max_freq_khz(40000),  // 优化: 40MHz (从 20MHz 提升)
-      max_files(5), allocation_unit_size(32 * 1024), format_if_mount_failed(false),  // 优化: 32KB 分配单元 (从 16KB 提升)
+      mode(SD_MODE_MMC_1BIT), mount_point("/sdcard"), max_freq_khz(40000), 
+      max_files(5), allocation_unit_size(64 * 1024), format_if_mount_failed(false),
       mmc_clk_pin(GPIO_NUM_NC), mmc_cmd_pin(GPIO_NUM_NC), mmc_d0_pin(GPIO_NUM_NC),
       mmc_d1_pin(GPIO_NUM_NC), mmc_d2_pin(GPIO_NUM_NC), mmc_d3_pin(GPIO_NUM_NC),
       mmc_internal_pullup(true),
