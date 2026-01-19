@@ -332,7 +332,27 @@ private:
     bool _initialized;
     bool _owns_dev;
 
-    struct bmi2_fifo_frame fifoframe = { 0 };
+    struct bmi2_fifo_frame fifoframe = {
+        .data = nullptr,
+        .length = 0,
+        .header_enable = 0,
+        .data_enable = 0,
+        .acc_byte_start_idx = 0,
+        .act_recog_byte_start_idx = 0,
+        .aux_byte_start_idx = 0,
+        .gyr_byte_start_idx = 0,
+        .sensor_time = 0,
+        .skipped_frame_count = 0,
+        .data_int_map = 0,
+        .wm_lvl = 0,
+        .acc_frm_len = 0,
+        .gyr_frm_len = 0,
+        .aux_frm_len = 0,
+        .acc_gyr_frm_len = 0,
+        .acc_aux_frm_len = 0,
+        .aux_gyr_frm_len = 0,
+        .all_frm_len = 0,
+    };
     uint8_t fifo_data[BMI2_FIFO_RAW_DATA_BUFFER_SIZE];
     
     struct bmi2_dev _bmi270_dev;        // BMI270 API设备结构
