@@ -10,10 +10,22 @@
 #include "esp_err.h"
 #include <stdexcept>
 #include "i2c_bus_tools.h"
+
+#ifdef OTOOL_ENABLE_AUDIO
 #include "audio_tools.h"
+#endif
+
+#ifdef OTOOL_ENABLE_IR
 #include "ir_tools.h"
+#endif
+
+#ifdef OTOOL_ENABLE_SD
 #include "sd_tools.h"
+#endif
+
+#ifdef OTOOL_ENABLE_RTC_RX8130
 #include "ic_rx8130.h"
+#endif
 
 /**
  * @brief otool_toolbox 工具箱基类
@@ -25,10 +37,22 @@ protected:
 
 public:
     i2c_bus_tools i2c_tools;  ///< I2C总线工具对象
+
+#ifdef OTOOL_ENABLE_AUDIO
     audio_tools audio; ///< 音频处理工具对象
+#endif
+
+#ifdef OTOOL_ENABLE_IR
     ir_tools ir; ///< 多协议红外工具对象
+#endif
+
+#ifdef OTOOL_ENABLE_SD
     sd_tools sd_card; ///< SD卡工具对象
+#endif
+
+#ifdef OTOOL_ENABLE_RTC_RX8130
     rx8130_tools rtc_rx8130; ///< RX8130 RTC工具对象
+#endif
 
     /**
      * @brief 构造函数

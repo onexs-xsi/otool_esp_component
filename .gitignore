@@ -57,3 +57,4 @@ otool_audio/esp-sr_仅供代码参考
 otool_audio/esp-dsp_仅供代码参考
 otool_audio/.backups
 otool_audio/__pycache__
+.toolkit_history/
