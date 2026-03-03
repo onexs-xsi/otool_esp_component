@@ -28,7 +28,43 @@ from typing import List, Dict, Tuple, Optional, Set
 from dataclasses import dataclass, field
 import shutil
 from datetime import datetime
-import msvcrt  # Windows 键盘输入
+
+# 尝试复用 toolkit 的 ANSI 颜色工具和 msvcrt 支持
+try:
+    _toolkit_dir = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(_toolkit_dir))
+    from otool_esp_component_toolkit import C, wait_key, confirm, _HAS_MSVCRT
+    if _HAS_MSVCRT:
+        import msvcrt
+except ImportError:
+    # fallback: 独立运行时使用内联定义
+    import msvcrt  # Windows 键盘输入
+    _HAS_MSVCRT = True
+
+    class C:
+        RESET = "\033[0m"; BOLD = "\033[1m"; DIM = "\033[2m"
+        RED = "\033[31m"; GREEN = "\033[32m"; YELLOW = "\033[33m"
+        CYAN = "\033[36m"
+        @staticmethod
+        def ok(msg): return f"{C.GREEN}✓{C.RESET} {msg}"
+        @staticmethod
+        def err(msg): return f"{C.RED}✗{C.RESET} {msg}"
+        @staticmethod
+        def warn(msg): return f"{C.YELLOW}⚠{C.RESET} {msg}"
+        @staticmethod
+        def info(msg): return f"{C.CYAN}ℹ{C.RESET} {msg}"
+
+    def wait_key(msg="按任意键继续..."):
+        print(f"\n{msg}", end="", flush=True)
+        msvcrt.getch(); print()
+
+    def confirm(msg, default_yes=False):
+        hint = "[Y/n]" if default_yes else "[y/N]"
+        try:
+            raw = input(f"{msg} {hint}: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return (raw in ("y", "yes")) if raw else default_yes
 
 
 @dataclass

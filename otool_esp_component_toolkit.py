@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-otool_esp_component_toolkit.py
+otool_esp_component_toolkit.py  v2.0
 
 多组件管理工具：
 1. 管理子组件开关（默认全部关闭，仅保留框架）
 2. 管理音频参数默认开关（AUDIO_FILE_CONFIGS）
 3. 使用 .toolkit_history 记录"某个项目"的启用配置
 4. 提供 push/pull 流程：
-   - push: 保存当前项目配置 -> 全部禁用 -> 可选 git push
+   - push: 保存当前项目配置 -> 全部禁用 -> 可选 git push -> 恢复
    - pull: 可选执行 git pull -> 从历史恢复当前项目配置
-5. 提供交互式终端菜单（参考 check_and_update_material.py 风格）
+5. 提供交互式终端菜单（全字母键，简洁风格）
 
 使用方式：
   python otool_esp_component_toolkit.py              # 交互式菜单
@@ -118,14 +118,24 @@ SUBCOMPONENT_LABELS: Dict[str, str] = {
     "ENABLE_OTOOL_RTC_RX8130": "RTC (RX8130)",
 }
 
+# 子组件短标签（用于状态行紧凑显示）
+SUBCOMPONENT_SHORT: Dict[str, str] = {
+    "ENABLE_OTOOL_AUDIO":      "AUDIO",
+    "ENABLE_OTOOL_BMI270":     "IMU",
+    "ENABLE_OTOOL_IR":         "IR",
+    "ENABLE_OTOOL_POWER_IC":   "PWR",
+    "ENABLE_OTOOL_SD":         "SD",
+    "ENABLE_OTOOL_RTC_RX8130": "RTC",
+}
+
 HISTORY_DIR_NAME = ".toolkit_history"
 HISTORY_FILE_NAME = "component_config_history.json"
 HISTORY_VERSION = 1
 
 BANNER = f"""{C.CYAN}{C.BOLD}\
   ╔══════════════════════════════════════════════════════════════╗
-  ║        otool_esp_component Toolkit  v1.0                    ║
-  ║        多组件配置管理 · 推送拉取 · 历史记录                 ║
+  ║        otool_esp_component Toolkit  v2.0                     ║
+  ║        组件配置 · 历史管理 · 推送拉取工作流                  ║
   ╚══════════════════════════════════════════════════════════════╝{C.RESET}
 """
 
@@ -223,16 +233,8 @@ class CMakeStateManager:
         body = match.group("body")
         audio_defaults: Dict[str, bool] = {}
 
-        for raw_line in body.splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-
-            quoted = re.match(r'^"([^"]+)"', line)
-            if not quoted:
-                continue
-
-            payload = quoted.group(1)
+        # 使用 findall 提取所有引号内容，支持多条同行的情况
+        for payload in re.findall(r'"([^"]+)"', body):
             parts = payload.split(":")
             if len(parts) < 3:
                 continue
@@ -266,30 +268,20 @@ class CMakeStateManager:
             return text
 
         body = match.group("body")
-        rewritten_lines: List[str] = []
 
-        for line in body.splitlines(keepends=True):
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                rewritten_lines.append(line)
-                continue
-
-            m = re.match(r'^(\s*)"([^"]+)"(.*)$', line)
-            if not m:
-                rewritten_lines.append(line)
-                continue
-
-            indent, payload, suffix = m.group(1), m.group(2), m.group(3)
+        def _replace_one_entry(m: re.Match[str]) -> str:
+            """替换单个引号内条目的 ON/OFF"""
+            payload = m.group(1)
             parts = payload.split(":")
             if len(parts) >= 3:
                 audio_id = parts[0].strip()
                 if audio_id in audio_defaults:
                     parts[2] = "ON" if audio_defaults[audio_id] else "OFF"
-                    payload = ":".join(parts)
+                    return '"' + ":".join(parts) + '"'
+            return m.group(0)
 
-            rewritten_lines.append(f'{indent}"{payload}"{suffix}')
+        new_body = re.sub(r'"([^"]+)"', _replace_one_entry, body)
 
-        new_body = "".join(rewritten_lines)
         start = match.start("body")
         end = match.end("body")
         return text[:start] + new_body + text[end:]
@@ -452,6 +444,54 @@ def print_section(title: str) -> None:
     print()
     print(f"  {C.BOLD}{C.CYAN}── {title} ──{C.RESET}")
     print()
+
+
+def format_project_entry(meta: dict) -> str:
+    """格式化历史项目摘要（单行），供菜单和 CLI 共用"""
+    pname    = meta.get("project_name", "<unknown>")
+    saved_at = meta.get("saved_at", "?")
+    e_sub    = sum(1 for v in meta.get("subcomponents", {}).values() if v)
+    e_aud    = sum(1 for v in meta.get("audio_defaults", {}).values() if v)
+    return f"{C.CYAN}{pname}{C.RESET}  [{saved_at}]  子组件:{e_sub}  音频:{e_aud}"
+
+
+def format_component_tags(subcomponents: Dict[str, bool]) -> str:
+    """
+    生成启用子组件的绿色标签字符串，如 [AUDIO] [IR] [SD]
+    供主菜单状态行和历史列表复用。
+    """
+    tags = []
+    for name in SUBCOMPONENT_OPTIONS:
+        if subcomponents.get(name, False):
+            short = SUBCOMPONENT_SHORT.get(name, name)
+            tags.append(f"{C.GREEN}[{short}]{C.RESET}")
+    return " ".join(tags) if tags else f"{C.DIM}(全部禁用){C.RESET}"
+
+
+def format_audio_tags(audio_defaults: Dict[str, bool]) -> str:
+    """
+    生成启用音频文件的简短描述，如 candy_wind_2ch_16k · startup_2ch_16k
+    从 audio_id 中提取关键信息（去掉 AUDIO_ 前缀，转小写，截短）。
+    """
+    enabled = [k for k, v in audio_defaults.items() if v]
+    if not enabled:
+        return f"{C.DIM}(无){C.RESET}"
+    parts = []
+    for aid in sorted(enabled):
+        # AUDIO_CANDY_WIND_2CH_16K_16BIT_9S -> candy_wind_2ch_16k
+        short = aid.removeprefix("AUDIO_").lower()
+        # 取前3段（去掉位深和时长）
+        segs = short.split("_")
+        # 找到 "ch" 结尾的段作为截断点（保留到采样率）
+        cut = len(segs)
+        for i, s in enumerate(segs):
+            if s.endswith("s") and s[:-1].isdigit() and i > 2:
+                cut = i
+                break
+        parts.append("_".join(segs[:cut]))
+    return f"  {C.DIM}▸{C.RESET} " + f"  {C.DIM}·{C.RESET}  ".join(
+        f"{C.YELLOW}{p}{C.RESET}" for p in parts
+    )
 
 
 # ============================================================================
@@ -890,14 +930,16 @@ def workflow_push(
     git_args: str,
     component_root: Path,
     interactive: bool = False,
+    commit_msg: str = "",
 ) -> int:
     """
     Push 工作流：
     1. 保存当前项目配置到 .toolkit_history
     2. 将所有组件与参数设置为 OFF
     3. (可选) 执行 git add + commit + push
+    4. 恢复项目配置
     """
-    total_steps = 4 if run_git or interactive else 3
+    total_steps = 4
 
     print()
     print_divider("═")
@@ -906,8 +948,18 @@ def workflow_push(
 
     # 步骤 1: 保存配置
     print(C.step(1, total_steps, "保存当前项目配置到历史"))
+    pre_push_state = cmake.load_state()
     if not dry_run:
-        save_current_project_state(project, cmake, history)
+        if not pre_push_state.is_all_disabled():
+            # 当前有启用的组件，保存到历史
+            save_current_project_state(project, cmake, history)
+        else:
+            # 当前已是全 OFF，检查是否已有历史配置
+            saved = history.load_project_state(project)
+            if saved and not saved.is_all_disabled():
+                print(C.info("当前已是全 OFF 状态，保留已有历史配置不覆盖"))
+            else:
+                print(C.warn("当前为全 OFF 且无有效历史配置"))
     else:
         print(C.ok("[dry-run] 跳过历史写入"))
 
@@ -921,13 +973,16 @@ def workflow_push(
         print()
         print(C.step(3, total_steps, "Git 操作"))
         print()
-        _interactive_git_push(component_root)
+        _interactive_git_op(component_root, "push")
     elif run_git:
         print()
         print(C.step(3, total_steps, "执行 git push"))
         if dry_run:
             print(C.ok("[dry-run] 跳过 git 执行"))
         else:
+            msg = commit_msg or f"toolkit: push - disable all components ({now_str()})"
+            git_run(component_root, "add", "-A")
+            git_run(component_root, "commit", "-m", msg)
             args_list = shlex.split(git_args, posix=False) if git_args.strip() else []
             result = git_run(component_root, "push", *args_list)
             if result.returncode != 0:
@@ -976,7 +1031,7 @@ def workflow_pull(
     # 步骤 1: Git 操作
     print(C.step(1, total_steps, "Git 操作"))
     if interactive and not dry_run:
-        _interactive_git_pull(component_root)
+        _interactive_git_op(component_root, "pull")
     elif run_git:
         if dry_run:
             print(C.ok("[dry-run] 跳过 git 执行"))
@@ -1013,73 +1068,56 @@ def workflow_pull(
     return 0
 
 
-def _interactive_git_push(component_root: Path) -> None:
-    """交互式 git push 流程"""
-    # 显示 git 状态
-    status = git_status_summary(component_root)
-    branch = git_current_branch(component_root)
-
-    if branch:
-        print(f"  当前分支: {C.BOLD}{branch}{C.RESET}")
-    if status:
-        print(f"  工作区状态:")
-        for line in status.splitlines():
-            print(f"    {line}")
-    print()
-
-    if not git_has_remote(component_root):
-        print(C.warn("未检测到远程仓库，跳过 git 操作"))
-        return
-
-    # 1. git add
-    if confirm(f"  {C.CYAN}是否执行 git add -A ?{C.RESET}", default_yes=True):
-        result = git_run(component_root, "add", "-A")
-        if result.returncode != 0:
-            print(C.err("git add 失败"))
-            return
-
-    # 2. git commit
-    if confirm(f"  {C.CYAN}是否执行 git commit ?{C.RESET}", default_yes=True):
-        msg = input(f"  commit message (留空使用默认): ").strip()
-        if not msg:
-            msg = f"toolkit: push - disable all components ({now_str()})"
-        result = git_run(component_root, "commit", "-m", msg)
-        if result.returncode != 0:
-            print(C.warn("git commit 返回非零（可能没有变更需要提交）"))
-
-    # 3. git push
-    if confirm(f"  {C.CYAN}是否执行 git push ?{C.RESET}", default_yes=True):
-        remote_branch = input(f"  push 参数 (留空使用默认): ").strip()
-        if remote_branch:
-            args = shlex.split(remote_branch, posix=False)
-            result = git_run(component_root, "push", *args)
-        else:
-            result = git_run(component_root, "push")
-        if result.returncode != 0:
-            print(C.err(f"git push 失败，退出码: {result.returncode}"))
-
-
-def _interactive_git_pull(component_root: Path) -> None:
-    """交互式 git pull 流程"""
+def _print_git_context(component_root: Path, show_status: bool = False) -> None:
+    """打印当前分支和（可选）工作区状态"""
     branch = git_current_branch(component_root)
     if branch:
         print(f"  当前分支: {C.BOLD}{branch}{C.RESET}")
+    if show_status:
+        status = git_status_summary(component_root)
+        if status:
+            print(f"  工作区状态:")
+            for line in status.splitlines():
+                print(f"    {line}")
+        print()
+
+
+def _interactive_git_op(component_root: Path, op: str) -> None:
+    """
+    交互式 git 操作，op 为 "push" 或 "pull"。
+    push 时额外提示 git add + commit。
+    """
+    _print_git_context(component_root, show_status=(op == "push"))
 
     if not git_has_remote(component_root):
-        print(C.warn("未检测到远程仓库，跳过 git pull"))
+        print(C.warn(f"未检测到远程仓库，跳过 git {op}"))
         return
 
-    if confirm(f"  {C.CYAN}是否执行 git pull ?{C.RESET}", default_yes=True):
-        remote_branch = input(f"  pull 参数 (留空使用默认): ").strip()
-        if remote_branch:
-            args = shlex.split(remote_branch, posix=False)
-            result = git_run(component_root, "pull", *args)
-        else:
-            result = git_run(component_root, "pull")
+    if op == "push":
+        # git add
+        if confirm(f"  {C.CYAN}是否执行 git add -A ?{C.RESET}", default_yes=True):
+            result = git_run(component_root, "add", "-A")
+            if result.returncode != 0:
+                print(C.err("git add 失败"))
+                return
+        # git commit
+        if confirm(f"  {C.CYAN}是否执行 git commit ?{C.RESET}", default_yes=True):
+            msg = input("  commit message (留空使用默认): ").strip()
+            if not msg:
+                msg = f"toolkit: push - disable all components ({now_str()})"
+            result = git_run(component_root, "commit", "-m", msg)
+            if result.returncode != 0:
+                print(C.warn("git commit 返回非零（可能没有变更需要提交）"))
+
+    # git push / pull
+    if confirm(f"  {C.CYAN}是否执行 git {op} ?{C.RESET}", default_yes=True):
+        extra = input(f"  {op} 参数 (留空使用默认): ").strip()
+        args = shlex.split(extra, posix=False) if extra else []
+        result = git_run(component_root, op, *args)
         if result.returncode != 0:
-            print(C.err(f"git pull 失败，退出码: {result.returncode}"))
+            print(C.err(f"git {op} 失败，退出码: {result.returncode}"))
     else:
-        print(C.info("跳过 git pull"))
+        print(C.info(f"跳过 git {op}"))
 
 
 # ============================================================================
@@ -1208,6 +1246,40 @@ SUBTOOLS: List[Tuple[str, str, str]] = [
 # ============================================================================
 # 交互式菜单
 # ============================================================================
+def _menu_header(project: ProjectContext, state: ComponentState, branch: Optional[str]) -> None:
+    """打印菜单顶部 banner + 状态行"""
+    print(BANNER)
+    e_sub = state.enabled_sub_count()
+    e_aud = state.enabled_audio_count()
+    branch_str = f"  {C.MAGENTA}{branch}{C.RESET}" if branch else ""
+    # 第一行：项目名 + 分支 + 计数
+    sub_color = C.YELLOW if e_sub > 0 else C.DIM
+    aud_color  = C.YELLOW if e_aud > 0 else C.DIM
+    print(
+        f"  {C.BOLD}{project.name}{C.RESET}{branch_str}"
+        f"  {C.DIM}│{C.RESET}"
+        f"  子组件 {sub_color}{e_sub}/{len(state.subcomponents)}{C.RESET}"
+        f"  {C.DIM}│{C.RESET}"
+        f"  音频 {aud_color}{e_aud}/{len(state.audio_defaults)}{C.RESET}"
+    )
+    # 第二行：子组件标签
+    print(f"  {format_component_tags(state.subcomponents)}")
+    # 第三行：音频详情（仅有启用时显示）
+    if e_aud > 0:
+        print(f"{format_audio_tags(state.audio_defaults)}")
+
+
+def _menu_group(title: str) -> None:
+    """打印单行分组标题"""
+    width = LINE_W - 4 - len(title)
+    print(f"\n  {C.DIM}── {title} {'─' * max(width, 4)}{C.RESET}")
+
+
+def _menu_item(key: str, desc: str, note: str = "") -> None:
+    note_str = f"  {C.DIM}{note}{C.RESET}" if note else ""
+    print(f"  {C.BOLD}{key}{C.RESET}   {desc}{note_str}")
+
+
 def run_menu(
     project: ProjectContext,
     cmake: CMakeStateManager,
@@ -1216,79 +1288,52 @@ def run_menu(
 ) -> int:
     while True:
         clear_terminal()
-        state = cmake.load_state()
+        state  = cmake.load_state()
         branch = git_current_branch(component_root)
 
-        print(BANNER)
+        _menu_header(project, state, branch)
 
-        # 项目信息
-        print(f"  {C.BOLD}项目:{C.RESET}  {C.CYAN}{project.name}{C.RESET}")
-        print(f"  {C.BOLD}路径:{C.RESET}  {C.DIM}{project.path}{C.RESET}")
-        if branch:
-            print(f"  {C.BOLD}分支:{C.RESET}  {C.MAGENTA}{branch}{C.RESET}")
+        _menu_group("配置")
+        _menu_item("s", "状态总览")
+        _menu_item("e", "编辑子组件开关")
+        _menu_item("a", "编辑音频参数")
+        _menu_item("x", "全部禁用")
 
-        e_sub = state.enabled_sub_count()
-        e_aud = state.enabled_audio_count()
-        status_color = C.GREEN if state.is_all_disabled() else C.YELLOW
-        print(f"  {C.BOLD}状态:{C.RESET}  {status_color}子组件 {e_sub}/{len(state.subcomponents)}  |  音频 {e_aud}/{len(state.audio_defaults)}{C.RESET}")
+        _menu_group("历史")
+        _menu_item("w", "保存当前配置")
+        _menu_item("r", "恢复配置")
+        _menu_item("h", "历史列表")
 
-        print()
-        print_divider("─")
-        print(f"  {C.BOLD}配置管理{C.RESET}")
-        print_divider("─")
-        print(f"  {C.BOLD}1{C.RESET})  查看当前配置详情")
-        print(f"  {C.BOLD}2{C.RESET})  编辑子组件开关")
-        print(f"  {C.BOLD}3{C.RESET})  编辑音频参数开关")
-        print(f"  {C.BOLD}4{C.RESET})  全部禁用（恢复到拉取默认状态）")
+        _menu_group("工作流")
+        _menu_item("p", f"{C.YELLOW}Push{C.RESET}", "保存 → 禁用 → git push → 恢复")
+        _menu_item("l", f"{C.GREEN}Pull{C.RESET}", "git pull → 恢复")
+        _menu_item("i", f"{C.CYAN}Init{C.RESET}", "子模块初始化 → 恢复")
 
-        print()
-        print_divider("─")
-        print(f"  {C.BOLD}历史记录{C.RESET}")
-        print_divider("─")
-        print(f"  {C.BOLD}5{C.RESET})  保存当前配置到历史")
-        print(f"  {C.BOLD}6{C.RESET})  从历史恢复当前项目配置")
-        print(f"  {C.BOLD}7{C.RESET})  查看/管理历史项目列表")
-
-        print()
-        print_divider("─")
-        print(f"  {C.BOLD}推送 / 拉取 / 初始化{C.RESET}")
-        print_divider("─")
-        print(f"  {C.BOLD}8{C.RESET})  {C.YELLOW}Push{C.RESET} 工作流（保存 → 全部禁用 → git push → 恢复）")
-        print(f"  {C.BOLD}9{C.RESET})  {C.GREEN}Pull{C.RESET} 工作流（git pull → 询问恢复配置）")
-        print(f"  {C.BOLD}i{C.RESET})  {C.CYAN}Init{C.RESET} 首次初始化（submodule init → 恢复配置）")
-
-        print()
-        print_divider("─")
-        print(f"  {C.BOLD}子工具{C.RESET}")
-        print_divider("─")
+        _menu_group("工具")
         for key, rel_path, desc in SUBTOOLS:
-            script_exists = (component_root / rel_path).exists()
-            status_mark = "" if script_exists else f"  {C.RED}(缺失){C.RESET}"
-            print(f"  {C.BOLD}{key}{C.RESET})  {C.MAGENTA}{desc}{C.RESET}{status_mark}")
+            exists = (component_root / rel_path).exists()
+            _menu_item(key.lower(), desc, "" if exists else "(脚本缺失)")
+        _menu_item("g", "Git 状态 / 子模块")
 
-        print()
+        print(f"\n  {C.DIM}q   退出{C.RESET}")
         print_divider("─")
-        print(f"  {C.BOLD}g{C.RESET})  查看 Git 状态 / 子模块")
-        print(f"  {C.BOLD}0{C.RESET})  退出")
-        print_divider("═")
 
         try:
-            choice = input(f"  {C.BOLD}选择操作:{C.RESET} ").strip().lower()
+            choice = input(f"  {C.BOLD}>{C.RESET} ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
 
-        # ── 1: 查看当前配置 ──
-        if choice == "1":
+        # ── s: 状态总览 ──
+        if choice == "s":
             clear_terminal()
             print_state_summary(state)
             wait_key()
-            continue
 
-        # ── 2: 编辑子组件开关 ──
-        if choice == "2":
+        # ── e: 编辑子组件 ──
+        elif choice == "e":
             updated = interactive_toggle(
-                title="子组件开关编辑",
+                title="子组件开关",
                 options=state.subcomponents,
                 ordered_keys=SUBCOMPONENT_OPTIONS,
                 labels=SUBCOMPONENT_LABELS,
@@ -1296,152 +1341,110 @@ def run_menu(
             if updated is not None:
                 state.subcomponents = updated
                 cmake.apply_state(state)
-                print(C.ok("子组件开关已写入 CMakeLists.txt"))
+                print(C.ok("已写入 CMakeLists.txt"))
                 wait_key()
-            continue
 
-        # ── 3: 编辑音频参数开关 ──
-        if choice == "3":
+        # ── a: 编辑音频参数 ──
+        elif choice == "a":
             if not state.audio_defaults:
-                print(C.warn("当前未发现 AUDIO_FILE_CONFIGS 配置项"))
-                print(C.info("提示: 需要先启用 ENABLE_OTOOL_AUDIO 子组件"))
+                print(C.warn("未发现 AUDIO_FILE_CONFIGS 配置项"))
+                print(C.info("提示: 先启用 ENABLE_OTOOL_AUDIO"))
                 wait_key()
-                continue
+            else:
+                updated = interactive_toggle(
+                    title="音频嵌入参数",
+                    options=state.audio_defaults,
+                )
+                if updated is not None:
+                    state.audio_defaults = updated
+                    cmake.apply_state(state)
+                    print(C.ok("已写入 CMakeLists.txt"))
+                    wait_key()
 
-            updated = interactive_toggle(
-                title="音频嵌入参数开关编辑",
-                options=state.audio_defaults,
-            )
-            if updated is not None:
-                state.audio_defaults = updated
-                cmake.apply_state(state)
-                print(C.ok("音频参数开关已写入 CMakeLists.txt"))
-                wait_key()
-            continue
-
-        # ── 4: 全部禁用 ──
-        if choice == "4":
+        # ── x: 全部禁用 ──
+        elif choice == "x":
             if state.is_all_disabled():
                 print(C.info("当前已是全部禁用状态"))
                 wait_key()
-                continue
-            print()
-            print(C.warn("即将把所有子组件和音频参数设为 OFF"))
-            if confirm("  确认操作?"):
-                disable_all(cmake, dry_run=False)
+            elif confirm(f"  {C.YELLOW}将所有开关设为 OFF，确认?{C.RESET}"):
+                disable_all(cmake)
             else:
-                print(C.info("操作已取消"))
-            wait_key()
-            continue
+                print(C.info("已取消"))
+                wait_key()
 
-        # ── 5: 保存配置到历史 ──
-        if choice == "5":
+        # ── s(大写)/S: 保存配置 ──  (已 lower，统一用小写判断)
+        # 注意: 's' 已被状态总览占用，保存用 'w'（write）避免冲突
+        elif choice == "w":
             print()
             save_current_project_state(project, cmake, history)
             wait_key()
-            continue
 
-        # ── 6: 从历史恢复配置 ──
-        if choice == "6":
+        # ── r: 恢复配置 ──
+        elif choice == "r":
             print()
             saved = history.load_project_state(project)
             if not saved:
                 print(C.warn(f"未找到项目 [{project.name}] 的历史配置"))
-                print(C.info("提示: 可先用选项 5 保存当前配置，或从选项 7 选择其他项目"))
+                print(C.info("提示: 先用 w 保存，或用 h 查看其他项目"))
                 wait_key()
-                continue
-
-            print(C.info(f"即将从历史恢复项目: {C.BOLD}{project.name}{C.RESET}"))
-            print(f"  历史中启用的子组件: {saved.enabled_sub_count()}")
-            print(f"  历史中启用的音频:   {saved.enabled_audio_count()}")
-            if confirm("  确认恢复?", default_yes=True):
-                restore_project_state(project, cmake, history, dry_run=False)
             else:
-                print(C.info("操作已取消"))
-            wait_key()
-            continue
+                print(C.info(f"历史: 子组件 {saved.enabled_sub_count()} ON  音频 {saved.enabled_audio_count()} ON"))
+                if confirm("  确认恢复?", default_yes=True):
+                    restore_project_state(project, cmake, history)
+                else:
+                    print(C.info("已取消"))
+                wait_key()
 
-        # ── 7: 查看/管理历史列表 ──
-        if choice == "7":
+        # ── h: 历史列表 ──
+        elif choice == "h":
             _menu_history_list(history, project)
-            continue
 
-        # ── 8: Push 工作流 ──
-        if choice == "8":
+        # ── p: Push 工作流 ──
+        elif choice == "p":
             clear_terminal()
             workflow_push(
-                project=project,
-                cmake=cmake,
-                history=history,
-                dry_run=False,
-                run_git=False,
-                git_args="",
-                component_root=component_root,
-                interactive=True,
+                project=project, cmake=cmake, history=history,
+                dry_run=False, run_git=False, git_args="",
+                component_root=component_root, interactive=True,
             )
             wait_key()
-            continue
 
-        # ── 9: Pull 工作流 ──
-        if choice == "9":
+        # ── l: Pull 工作流 ──
+        elif choice == "l":
             clear_terminal()
             workflow_pull(
-                project=project,
-                cmake=cmake,
-                history=history,
-                dry_run=False,
-                run_git=False,
-                git_args="",
-                component_root=component_root,
-                interactive=True,
+                project=project, cmake=cmake, history=history,
+                dry_run=False, run_git=False, git_args="",
+                component_root=component_root, interactive=True,
             )
             wait_key()
-            continue
 
         # ── i: Init 工作流 ──
-        if choice == "i":
+        elif choice == "i":
             clear_terminal()
             workflow_init(
-                project=project,
-                cmake=cmake,
-                history=history,
+                project=project, cmake=cmake, history=history,
                 component_root=component_root,
             )
             wait_key()
-            continue
 
-        # ── g: Git 状态 / 子模块 ──
-        if choice == "g":
+        # ── g: Git 状态 ──
+        elif choice == "g":
             clear_terminal()
             print_section("Git 状态")
-            branch = git_current_branch(component_root)
-            status = git_status_summary(component_root)
-            if branch:
-                print(f"  分支: {C.BOLD}{branch}{C.RESET}")
-            if status:
-                print(f"  状态:")
-                for line in status.splitlines():
-                    print(f"    {line}")
-            else:
-                print(C.warn("无法获取 git 状态（可能不是 git 仓库）"))
-
-            # 显示子模块状态
-            print()
+            _print_git_context(component_root, show_status=True)
             print_submodule_status(component_root)
             wait_key()
-            continue
 
-        # ── 子工具快捷键 ──
-        subtool_match = [t for t in SUBTOOLS if t[0] == choice]
-        if subtool_match:
-            _, rel_path, desc = subtool_match[0]
+        # ── 子工具 ──
+        elif any(choice == t[0].lower() for t in SUBTOOLS):
+            _, rel_path, _ = next(t for t in SUBTOOLS if t[0].lower() == choice)
             clear_terminal()
             launch_subtool(component_root, rel_path)
             wait_key()
-            continue
 
-        # ── 0: 退出 ──
-        if choice in ("0", "q", "quit", "exit"):
+        # ── q: 退出 ──
+        elif choice in ("q", "0", "quit", "exit"):
             return 0
 
 
@@ -1455,48 +1458,39 @@ def _menu_history_list(history: ToolkitHistory, current_project: ProjectContext)
 
         if not projects:
             print(f"  {C.DIM}(暂无历史记录){C.RESET}")
-            print()
-            print(f"  {C.DIM}提示: 使用主菜单选项 5 保存当前配置{C.RESET}")
+            print(f"  {C.DIM}提示: 主菜单 S 保存当前配置{C.RESET}")
             wait_key()
             return
 
         for idx, (key, meta) in enumerate(projects, start=1):
-            pname = meta.get("project_name", "<unknown>")
-            ppath = meta.get("project_path", "<unknown>")
-            saved_at = meta.get("saved_at", "<unknown>")
-
-            # 标记当前项目
             is_current = (key == current_project.key)
             marker = f"  {C.GREEN}◂ 当前{C.RESET}" if is_current else ""
-
-            e_sub = sum(1 for v in meta.get("subcomponents", {}).values() if v)
-            e_aud = sum(1 for v in meta.get("audio_defaults", {}).values() if v)
-
-            print(f"  {C.BOLD}{idx:2d}{C.RESET}. {C.CYAN}{pname}{C.RESET}{marker}")
-            print(f"      路径:    {C.DIM}{ppath}{C.RESET}")
-            print(f"      保存于:  {saved_at}")
-            print(f"      子组件: {e_sub} ON  |  音频: {e_aud} ON")
+            print(f"  {C.BOLD}{idx:2d}{C.RESET}. {format_project_entry(meta)}{marker}")
+            print(f"      {C.DIM}{meta.get('project_path', '?')}{C.RESET}")
+            # 子组件标签
+            sub = meta.get("subcomponents", {})
+            aud = meta.get("audio_defaults", {})
+            print(f"      {format_component_tags(sub)}")
+            if any(aud.values()):
+                print(f"    {format_audio_tags(aud)}")
             print()
 
         print_divider("─")
-        print(f"  {C.DIM}输入序号查看详情  |  d+序号 删除记录  |  q 返回{C.RESET}")
+        print(f"  {C.DIM}序号 查看详情  │  d<序号> 删除  │  q 返回{C.RESET}")
         print_divider("─")
 
         try:
-            raw = input(f"  输入: ").strip().lower()
+            raw = input("  > ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return
 
-        if raw in ("q", "quit", ""):
+        if raw in ("q", ""):
             return
-
-        # 删除记录
-        if raw.startswith("d") and raw[1:].strip().isdigit():
             num = int(raw[1:].strip())
             if 1 <= num <= len(projects):
                 key, meta = projects[num - 1]
                 pname = meta.get("project_name", "<unknown>")
-                if confirm(f"  确认删除历史记录 [{pname}] ?"):
+                if confirm(f"  确认删除 [{pname}] ?"):
                     if history.delete_project(key):
                         print(C.ok(f"已删除: {pname}"))
                     else:
@@ -1504,7 +1498,6 @@ def _menu_history_list(history: ToolkitHistory, current_project: ProjectContext)
                     wait_key()
             continue
 
-        # 查看详情
         if raw.isdigit():
             num = int(raw)
             if 1 <= num <= len(projects):
@@ -1512,18 +1505,17 @@ def _menu_history_list(history: ToolkitHistory, current_project: ProjectContext)
                 clear_terminal()
                 pname = meta.get("project_name", "<unknown>")
                 print_section(f"历史详情: {pname}")
-                print(f"  Key:     {C.DIM}{key}{C.RESET}")
-                print(f"  路径:    {meta.get('project_path', '?')}")
-                print(f"  保存于:  {meta.get('saved_at', '?')}")
+                print(f"  Key:    {C.DIM}{key}{C.RESET}")
+                print(f"  路径:   {meta.get('project_path', '?')}")
+                print(f"  保存于: {meta.get('saved_at', '?')}")
                 print()
 
                 sub = meta.get("subcomponents", {})
                 print(f"  {C.BOLD}子组件:{C.RESET}")
                 for name in SUBCOMPONENT_OPTIONS:
-                    enabled = sub.get(name, False)
                     label = SUBCOMPONENT_LABELS.get(name, "")
                     display = f"{name}  {C.DIM}({label}){C.RESET}" if label else name
-                    print(C.on_off(enabled, display))
+                    print(C.on_off(sub.get(name, False), display))
                 print()
 
                 aud = meta.get("audio_defaults", {})
@@ -1618,6 +1610,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     C.enable_win_ansi()
 
+    # 始终以脚本所在目录为工作目录，无论从哪里调用
+    os.chdir(Path(__file__).resolve().parent)
+
     parser = build_parser()
     args = parser.parse_args()
 
@@ -1673,37 +1668,13 @@ def main() -> int:
     # ── push ──
     if command == "push":
         run_git = bool(args.run_git)
-        # 非 --run-git 模式下，CLI push 也进入交互式 git 提示
         interactive_git = not run_git and sys.stdin.isatty()
-
-        if run_git and not args.dry_run:
-            # 自动 git push: 先 add + commit
-            commit_msg = args.commit_msg or f"toolkit: push - disable all components ({now_str()})"
-
-            code = workflow_push(
-                project=project, cmake=cmake, history=history,
-                dry_run=bool(args.dry_run), run_git=False,
-                git_args="", component_root=component_root,
-            )
-            if code != 0:
-                return code
-
-            print()
-            print(C.step(3, 3, "自动 git 操作"))
-            git_run(component_root, "add", "-A")
-            git_run(component_root, "commit", "-m", commit_msg)
-            args_list = shlex.split(args.git_args, posix=False) if args.git_args.strip() else []
-            result = git_run(component_root, "push", *args_list)
-            if result.returncode != 0:
-                print(C.err(f"git push 失败: {result.returncode}"))
-                return result.returncode
-            print(C.ok("git push 完成"))
-            return 0
-
         return workflow_push(
             project=project, cmake=cmake, history=history,
             dry_run=bool(args.dry_run),
-            run_git=False, git_args="",
+            run_git=run_git,
+            git_args=str(args.git_args),
+            commit_msg=str(args.commit_msg),
             component_root=component_root,
             interactive=interactive_git,
         )
@@ -1732,14 +1703,8 @@ def main() -> int:
         print()
         print_section("历史项目记录")
         for idx, (key, meta) in enumerate(projects, start=1):
-            pname = meta.get("project_name", "<unknown>")
-            ppath = meta.get("project_path", "<unknown>")
-            saved_at = meta.get("saved_at", "<unknown>")
-            e_sub = sum(1 for v in meta.get("subcomponents", {}).values() if v)
-            e_aud = sum(1 for v in meta.get("audio_defaults", {}).values() if v)
-            print(f"  {idx:2d}. {C.BOLD}{pname}{C.RESET}  |  {saved_at}")
-            print(f"      {C.DIM}{ppath}{C.RESET}")
-            print(f"      子组件: {e_sub} ON  |  音频: {e_aud} ON")
+            print(f"  {idx:2d}. {format_project_entry(meta)}")
+            print(f"      {C.DIM}{meta.get('project_path', '?')}{C.RESET}")
         print()
         return 0
 
