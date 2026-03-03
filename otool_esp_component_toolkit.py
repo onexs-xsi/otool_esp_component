@@ -28,7 +28,7 @@ import re
 import shlex
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -149,17 +149,20 @@ LINE_W = 64
 class ComponentState:
     subcomponents: Dict[str, bool]
     audio_defaults: Dict[str, bool]
+    audio_file_map: Dict[str, str] = field(default_factory=dict)  # audio_id → 文件名
 
     def clone(self) -> "ComponentState":
         return ComponentState(
             subcomponents=dict(self.subcomponents),
             audio_defaults=dict(self.audio_defaults),
+            audio_file_map=dict(self.audio_file_map),
         )
 
     def all_disabled(self) -> "ComponentState":
         return ComponentState(
             subcomponents={k: False for k in self.subcomponents.keys()},
             audio_defaults={k: False for k in self.audio_defaults.keys()},
+            audio_file_map=dict(self.audio_file_map),
         )
 
     def enabled_sub_count(self) -> int:
@@ -205,11 +208,12 @@ class CMakeStateManager:
             if option_name in subcomponents:
                 subcomponents[option_name] = option_value
 
-        audio_defaults = self._parse_audio_defaults(text)
+        audio_defaults, audio_file_map = self._parse_audio_defaults(text)
 
         return ComponentState(
             subcomponents=subcomponents,
             audio_defaults=audio_defaults,
+            audio_file_map=audio_file_map,
         )
 
     def apply_state(self, state: ComponentState, dry_run: bool = False) -> None:
@@ -225,13 +229,14 @@ class CMakeStateManager:
 
         self._write_text(text)
 
-    def _parse_audio_defaults(self, text: str) -> Dict[str, bool]:
+    def _parse_audio_defaults(self, text: str) -> Tuple[Dict[str, bool], Dict[str, str]]:
         match = self.AUDIO_BLOCK_PATTERN.search(text)
         if not match:
-            return {}
+            return {}, {}
 
         body = match.group("body")
         audio_defaults: Dict[str, bool] = {}
+        audio_file_map: Dict[str, str] = {}
 
         # 使用 findall 提取所有引号内容，支持多条同行的情况
         for payload in re.findall(r'"([^"]+)"', body):
@@ -240,11 +245,13 @@ class CMakeStateManager:
                 continue
 
             audio_id = parts[0].strip()
+            filename = parts[1].strip()
             default_val = parts[2].strip().upper()
             if default_val in ("ON", "OFF"):
                 audio_defaults[audio_id] = default_val == "ON"
+                audio_file_map[audio_id] = filename
 
-        return audio_defaults
+        return audio_defaults, audio_file_map
 
     def _replace_subcomponent_option(self, text: str, option_name: str, enabled: bool) -> str:
         target = "ON" if enabled else "OFF"
@@ -457,41 +464,78 @@ def format_project_entry(meta: dict) -> str:
 
 def format_component_tags(subcomponents: Dict[str, bool]) -> str:
     """
-    生成启用子组件的绿色标签字符串，如 [AUDIO] [IR] [SD]
+    生成所有子组件标签：启用绿色 [XXX]，禁用灰色 [XXX]
     供主菜单状态行和历史列表复用。
     """
     tags = []
     for name in SUBCOMPONENT_OPTIONS:
+        short = SUBCOMPONENT_SHORT.get(name, name)
         if subcomponents.get(name, False):
-            short = SUBCOMPONENT_SHORT.get(name, name)
             tags.append(f"{C.GREEN}[{short}]{C.RESET}")
-    return " ".join(tags) if tags else f"{C.DIM}(全部禁用){C.RESET}"
+        else:
+            tags.append(f"{C.DIM}[{short}]{C.RESET}")
+    return " ".join(tags) if tags else f"{C.DIM}[全部禁用]{C.RESET}"
 
 
-def format_audio_tags(audio_defaults: Dict[str, bool]) -> str:
+def _fmt_size(path: Path) -> str:
+    """格式化文件大小：< 1000K 显示 'xxxK'，>= 1000K 显示 'x.xM'"""
+    try:
+        b = path.stat().st_size
+    except OSError:
+        return "???"
+    k = b / 1024
+    if k < 1000:
+        return f"{int(k)}K"
+    return f"{k / 1024:.1f}M"
+
+
+def format_audio_tags(
+    audio_defaults: Dict[str, bool],
+    audio_file_map: Optional[Dict[str, str]] = None,
+    component_root: Optional[Path] = None,
+) -> str:
     """
-    生成启用音频文件的简短描述，如 candy_wind_2ch_16k · startup_2ch_16k
-    从 audio_id 中提取关键信息（去掉 AUDIO_ 前缀，转小写，截短）。
+    生成启用音频文件列表，每项单独一行（仅显示已启用项）。
+    若提供 audio_file_map + component_root，就在前缀显示对齐的文件大小标签。
     """
     enabled = [k for k, v in audio_defaults.items() if v]
     if not enabled:
-        return f"{C.DIM}(无){C.RESET}"
-    parts = []
+        return ""
+
+    playback_dir = (
+        component_root / "otool_audio" / "audio_playback_material"
+        if component_root else None
+    )
+
+    # 构建（显示名, 大小字符串）列表
+    entries: List[Tuple[str, str]] = []
     for aid in sorted(enabled):
-        # AUDIO_CANDY_WIND_2CH_16K_16BIT_9S -> candy_wind_2ch_16k
         short = aid.removeprefix("AUDIO_").lower()
-        # 取前3段（去掉位深和时长）
         segs = short.split("_")
-        # 找到 "ch" 结尾的段作为截断点（保留到采样率）
         cut = len(segs)
         for i, s in enumerate(segs):
             if s.endswith("s") and s[:-1].isdigit() and i > 2:
                 cut = i
                 break
-        parts.append("_".join(segs[:cut]))
-    return f"  {C.DIM}▸{C.RESET} " + f"  {C.DIM}·{C.RESET}  ".join(
-        f"{C.YELLOW}{p}{C.RESET}" for p in parts
-    )
+        name = "_".join(segs[:cut])
+
+        size_str = ""
+        if playback_dir and audio_file_map and aid in audio_file_map:
+            size_str = _fmt_size(playback_dir / audio_file_map[aid])
+
+        entries.append((name, size_str))
+
+    # 对齐大小列（取最大宽度）
+    max_sz = max((len(s) for _, s in entries if s), default=0)
+
+    lines = []
+    for name, size_str in entries:
+        if size_str:
+            bracket = f"[{size_str.rjust(max_sz)}]"
+            lines.append(f"  {C.DIM}▸ {bracket}{C.RESET} {name}")
+        else:
+            lines.append(f"  {C.DIM}▸{C.RESET} {name}")
+    return "\n".join(lines)
 
 
 # ============================================================================
@@ -1238,23 +1282,24 @@ def launch_subtool(component_root: Path, rel_script: str, extra_args: Optional[L
 
 
 # 子工具注册表（名称, 相对路径, 描述）
+# 注意：key 不能与主菜单已占用键冲突（s/e/a/c/x/w/r/h/p/l/i/g/q）
 SUBTOOLS: List[Tuple[str, str, str]] = [
-    ("a", "otool_audio/check_and_update_material.py", "音频素材管理（扫描/配置/代码生成）"),
+    ("m", "otool_audio/check_and_update_material.py", "音频素材管理（扫描/配置/代码生成）"),
 ]
 
 
 # ============================================================================
 # 交互式菜单
 # ============================================================================
-def _menu_header(project: ProjectContext, state: ComponentState, branch: Optional[str]) -> None:
+def _menu_header(project: ProjectContext, state: ComponentState, branch: Optional[str], component_root: Optional[Path] = None) -> None:
     """打印菜单顶部 banner + 状态行"""
     print(BANNER)
     e_sub = state.enabled_sub_count()
     e_aud = state.enabled_audio_count()
     branch_str = f"  {C.MAGENTA}{branch}{C.RESET}" if branch else ""
     # 第一行：项目名 + 分支 + 计数
-    sub_color = C.YELLOW if e_sub > 0 else C.DIM
-    aud_color  = C.YELLOW if e_aud > 0 else C.DIM
+    sub_color = C.GREEN if e_sub > 0 else C.DIM
+    aud_color  = C.GREEN if e_aud > 0 else C.DIM
     print(
         f"  {C.BOLD}{project.name}{C.RESET}{branch_str}"
         f"  {C.DIM}│{C.RESET}"
@@ -1262,11 +1307,12 @@ def _menu_header(project: ProjectContext, state: ComponentState, branch: Optiona
         f"  {C.DIM}│{C.RESET}"
         f"  音频 {aud_color}{e_aud}/{len(state.audio_defaults)}{C.RESET}"
     )
-    # 第二行：子组件标签
+    # 第二行：子组件标签（启用绿/禁用灰）
     print(f"  {format_component_tags(state.subcomponents)}")
-    # 第三行：音频详情（仅有启用时显示）
-    if e_aud > 0:
-        print(f"{format_audio_tags(state.audio_defaults)}")
+    # 第三行起：音频逐行显示（仅启用项，带文件大小）
+    audio_lines = format_audio_tags(state.audio_defaults, state.audio_file_map, component_root)
+    if audio_lines:
+        print(audio_lines)
 
 
 def _menu_group(title: str) -> None:
@@ -1291,13 +1337,14 @@ def run_menu(
         state  = cmake.load_state()
         branch = git_current_branch(component_root)
 
-        _menu_header(project, state, branch)
+        _menu_header(project, state, branch, component_root)
 
         _menu_group("配置")
         _menu_item("s", "状态总览")
         _menu_item("e", "编辑子组件开关")
         _menu_item("a", "编辑音频参数")
-        _menu_item("x", "全部禁用")
+        _menu_item("c", "清空配置", "保存历史 → 全部禁用（提交前用）")
+        _menu_item("x", "全部禁用", "不保存历史，直接禁用")
 
         _menu_group("历史")
         _menu_item("w", "保存当前配置")
@@ -1361,12 +1408,28 @@ def run_menu(
                     print(C.ok("已写入 CMakeLists.txt"))
                     wait_key()
 
-        # ── x: 全部禁用 ──
+        # ── c: 清空配置（保存 → 全部禁用） ──
+        elif choice == "c":
+            if state.is_all_disabled():
+                print(C.info("当前已是全部禁用状态，无需操作"))
+                wait_key()
+            else:
+                print()
+                print(C.info(f"将保存当前配置后设置全部为 OFF（子组件: {state.enabled_sub_count()}  音频: {state.enabled_audio_count()}）"))
+                if confirm(f"  {C.YELLOW}确认清空配置?{C.RESET}", default_yes=True):
+                    save_current_project_state(project, cmake, history)
+                    disable_all(cmake)
+                    print(C.ok("已清空，可用 r 恢复"))
+                else:
+                    print(C.info("已取消"))
+                wait_key()
+
+        # ── x: 全部禁用（不保存历史） ──
         elif choice == "x":
             if state.is_all_disabled():
                 print(C.info("当前已是全部禁用状态"))
                 wait_key()
-            elif confirm(f"  {C.YELLOW}将所有开关设为 OFF，确认?{C.RESET}"):
+            elif confirm(f"  {C.YELLOW}将所有开关设为 OFF（不保存历史），确认?{C.RESET}"):
                 disable_all(cmake)
             else:
                 print(C.info("已取消"))
@@ -1471,8 +1534,9 @@ def _menu_history_list(history: ToolkitHistory, current_project: ProjectContext)
             sub = meta.get("subcomponents", {})
             aud = meta.get("audio_defaults", {})
             print(f"      {format_component_tags(sub)}")
-            if any(aud.values()):
-                print(f"    {format_audio_tags(aud)}")
+            audio_lines = format_audio_tags(aud)
+            if audio_lines:
+                print(audio_lines)
             print()
 
         print_divider("─")
@@ -1548,7 +1612,8 @@ def build_parser() -> argparse.ArgumentParser:
   python otool_esp_component_toolkit.py pull                  # pull 工作流（交互式 git）
   python otool_esp_component_toolkit.py pull --run-git        # pull 工作流（自动 git pull）
   python otool_esp_component_toolkit.py init                  # 首次初始化（拉取子模块+恢复配置）
-  python otool_esp_component_toolkit.py disable-all           # 全部禁用
+  python otool_esp_component_toolkit.py disable-all           # 全部禁用（不保存历史）
+  python otool_esp_component_toolkit.py clear                 # 清空配置：保存历史 + 全部禁用（提交项目仓库前用）
   python otool_esp_component_toolkit.py list-history          # 查看历史
   python otool_esp_component_toolkit.py --project-id corep4   # 指定项目ID
 """,
@@ -1582,7 +1647,10 @@ def build_parser() -> argparse.ArgumentParser:
     restore = sub.add_parser("restore", help="从 .toolkit_history 恢复当前项目配置")
     restore.add_argument("--dry-run", action="store_true", help="仅预览，不写文件")
 
-    disable = sub.add_parser("disable-all", help="将子组件和音频参数全部设为 OFF")
+    clear = sub.add_parser("clear", help="清空配置：保存历史 + 全部禁用（提交项目仓库前用）")
+    clear.add_argument("--dry-run", action="store_true", help="仅预览，不写文件")
+
+    disable = sub.add_parser("disable-all", help="将子组件和音频参数全部设为 OFF（不保存历史）")
     disable.add_argument("--dry-run", action="store_true", help="仅预览，不写文件")
 
     push = sub.add_parser("push", help="push 工作流：保存历史 + 全部禁用 + 可选 git push")
@@ -1649,6 +1717,18 @@ def main() -> int:
     if command == "restore":
         ok = restore_project_state(project, cmake, history, dry_run=bool(args.dry_run))
         return 0 if ok else 1
+
+    # ── clear ──
+    if command == "clear":
+        state = cmake.load_state()
+        if state.is_all_disabled():
+            print(C.info("当前已是全部禁用状态，无需操作"))
+            return 0
+        dry = bool(args.dry_run)
+        save_current_project_state(project, cmake, history) if not dry else print(C.ok("[dry-run] 跳过历史保存"))
+        disable_all(cmake, dry_run=dry)
+        print(C.ok("清空完成，可用 restore 命令恢复"))
+        return 0
 
     # ── disable-all ──
     if command == "disable-all":
