@@ -32,6 +32,10 @@
 // 音频通用类型定义
 #include "audio_types.h"
 
+// 子对象类头文件
+#include "audio_playback.h"
+#include "audio_recorder.h"
+
 // 前置声明,避免循环依赖
 class audio_sr_afe;
 
@@ -57,75 +61,8 @@ class audio_sr_afe;
 #define TEST_ESP_OK(rc) CHECK((rc) == ESP_OK)
 #endif
 
-/**
- * @brief 音频文件枚举
- * 
- * 定义可播放的音频文件类型
- */
-typedef enum {
-    AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S = 0,  ///< candy_wind 1通道 16000Hz 16bit 9.0秒 (candy_wind_pcm_1ch_16k_16bit_9s.pcm)
-    AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S,     ///< candy_wind 1通道 44100Hz 16bit 45.0秒 (candy_wind_pcm_1ch_44.1k_16bit_45s.pcm)
-    AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S,     ///< candy_wind 2通道 16000Hz 16bit 9.0秒 (candy_wind_pcm_2ch_16k_16bit_9s.pcm)
-    AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S,     ///< candy_wind 2通道 44100Hz 16bit 45.0秒 (candy_wind_pcm_2ch_44.1k_16bit_45s.pcm)
-    AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S,     ///< sine_440Hz 2通道 16000Hz 16bit 10.0秒 (sine_440Hz_pcm_2ch_16k_16bit_10s.pcm)
-    AUDIO_FILE_STARTUP_1CH_16K_16B_4S,     ///< startup 1通道 16000Hz 16bit 4.0秒 (startup_pcm_1ch_16k_16bit_4s.pcm)
-    AUDIO_FILE_STARTUP_2CH_16K_16B_4S,     ///< startup 2通道 16000Hz 16bit 4.0秒 (startup_pcm_2ch_16k_16bit_4s.pcm)
-    AUDIO_FILE_MAX                             ///< 枚举最大值（用于边界检查）
-} audio_file_type_t;
-
-/**
- * @brief 音频播放模式
- *
- * 决定播放接口是阻塞执行还是创建后台任务异步播放
- */
-typedef enum {
-    AUDIO_PLAYBACK_BLOCKING = 0, ///< 阻塞播放，函数调用完成后表示播放已结束
-    AUDIO_PLAYBACK_ASYNC         ///< 异步播放，立即返回并在后台任务中完成播放
-} audio_playback_mode_t;
-
-/**
- * @brief 音频采样率枚举
- * 
- * 定义常用的音频采样率
- */
-typedef enum {
-    AUDIO_SAMPLE_RATE_8K = 8000,      ///< 8kHz - 电话质量
-    AUDIO_SAMPLE_RATE_16K = 16000,    ///< 16kHz - 语音通话
-    AUDIO_SAMPLE_RATE_22K = 22050,    ///< 22.05kHz - FM广播质量
-    AUDIO_SAMPLE_RATE_32K = 32000,    ///< 32kHz - 数字广播
-    AUDIO_SAMPLE_RATE_44K1 = 44100,   ///< 44.1kHz - CD质量
-    AUDIO_SAMPLE_RATE_48K = 48000,    ///< 48kHz - 专业音频
-    AUDIO_SAMPLE_RATE_88K2 = 88200,   ///< 88.2kHz - 高保真
-    AUDIO_SAMPLE_RATE_96K = 96000,    ///< 96kHz - 高保真专业
-    AUDIO_SAMPLE_RATE_176K4 = 176400, ///< 176.4kHz - 超高保真
-    AUDIO_SAMPLE_RATE_192K = 192000   ///< 192kHz - 超高保真专业
-} audio_sample_rate_t;
-
-/**
- * @brief 录音缓冲拆分结果
- *
- * 为最多4路麦克风通道提供独立的样本缓冲和基础元数据。
- * status 非 ESP_OK 时，其余字段可能为空，应先检查再使用。
- */
-typedef struct {
-    esp_err_t status;                          ///< 拆分操作结果
-    size_t samples_per_channel;                ///< 每个通道的样本数
-    size_t bytes_per_sample;                   ///< 原始I2S样本的字节数
-    bool is_tdm_mode;                          ///< 是否基于TDM模式拆分
-    audio_mic_channel_t enabled_mask;          ///< 参与拆分的麦克风掩码
-    int16_t* mic_buffers[4];                   ///< 各通道指向16bit单声道缓冲的指针（未启用时为nullptr）
-} channel_split_result_t;
-
-typedef struct {
-    bool available;                            ///< 通道是否有有效缓冲
-    size_t sample_count;                       ///< 通道样本数量
-    int16_t min_value;                         ///< 通道最小采样值
-    int16_t max_value;                         ///< 通道最大采样值
-    int32_t average_abs_amplitude;             ///< 平均绝对幅度
-    double rms_db;                             ///< RMS 电平 (dB)
-    double zero_percent;                       ///< 零值占比 (%)
-    double clipped_percent;                    ///< 剪裁占比 (%)
-} mic_channel_quality_t;
+// audio_file_type_t, audio_playback_mode_t, audio_sample_rate_t → 已迁移到 audio_types.h
+// channel_split_result_t, mic_channel_quality_t → 已迁移到 audio_recorder.h
 
 /**
  * @brief audio_tools 类
@@ -177,8 +114,6 @@ private:
     bool i2s_cross_data_pins = true;        ///< 是否使用交叉数据引脚映射（硬件走线导致）
     bool pins_high_z_on_sleep = false;      ///< 进入睡眠时是否将 I2S 与 PA 引脚置为高阻
     bool suppress_release = false;          ///< 在系统整体去初始化期间暂缓 I2S 释放
-    TaskHandle_t playback_task_handle = nullptr;   ///< 异步播放任务句柄
-    SemaphoreHandle_t audio_mutex = nullptr;       ///< 音频操作互斥锁
     
     // I2S 通道配置参数
     i2s_port_t i2s_port_num = I2S_NUM_0;                        ///< I2S通道编号
@@ -201,57 +136,24 @@ private:
     // ESP-SR AFE 子对象
     audio_sr_afe* sr_afe_ = nullptr;        ///< ESP-SR AFE 对象指针(用于 AEC 等功能)
 
-    struct playback_task_args {
-        audio_tools* instance;
-        audio_file_type_t audio_type;
-        float duration_limit_seconds;
-    };
+    // 子对象指针（惰性创建）
+    audio_playback* playback_ = nullptr;    ///< 播放子对象
+    audio_recorder* recorder_ = nullptr;    ///< 录音子对象
 
-    struct buffer_playback_task_args {
-        audio_tools* instance;
-        const uint8_t* buffer;
-        size_t buffer_size;
-        uint32_t buffer_sample_rate_hz;
-        audio_channels_t buffer_channels;
-        i2s_data_bit_width_t buffer_bits;
-        float duration_limit_seconds;
-        bool own_buffer;  ///< 是否需要在任务中释放buffer内存
-    };
+    // 系统级互斥锁（用于保护 deinit 等操作，also shared by audio_playback）
+    SemaphoreHandle_t audio_mutex = nullptr;
 
     // 内部辅助函数
     esp_err_t ensure_i2s_channel();         ///< 确保已创建 I2S 通道
     void try_release_i2s();                 ///< 在引用计数为 0 时释放 I2S 通道
     void incr_i2s_user();                   ///< 增加 I2S 使用者计数
     void decr_i2s_user();                   ///< 减少 I2S 使用者计数
-    esp_err_t play_audio_file_impl(audio_file_type_t audio_type, bool check_stop_signal, float duration_limit_seconds); ///< 内部播放实现
-    esp_err_t play_audio_buffer_impl(const uint8_t* buffer, size_t buffer_size, 
-                                      uint32_t buffer_sample_rate_hz, audio_channels_t buffer_channels, 
-                                      i2s_data_bit_width_t buffer_bits, 
-                                      bool check_stop_signal, float duration_limit_seconds); ///< 内部缓冲区播放实现
-    static void playback_task_entry(void* param);                ///< 异步播放任务入口
-    static void buffer_playback_task_entry(void* param);         ///< 异步缓冲区播放任务入口
-    
-    /**
-     * @brief 获取指定音频文件的PCM数据和格式参数
-     * 
-     * @param audio_type 音频文件类型
-     * @param pcm_start 输出：PCM数据起始指针
-     * @param pcm_len 输出：PCM数据长度
-     * @param file_sample_rate_hz 输出：文件采样率
-     * @param file_channels 输出：文件声道数
-     * @param file_bits 输出：文件位深
-     * @return esp_err_t 返回操作结果
-     */
-    esp_err_t get_pcm_data_and_format(audio_file_type_t audio_type,
-                                       const uint8_t*& pcm_start,
-                                       size_t& pcm_len,
-                                       uint32_t& file_sample_rate_hz,
-                                       audio_channels_t& file_channels,
-                                       i2s_data_bit_width_t& file_bits);
 
 public:
-    // 声明 audio_sr_afe 为友元类,允许其访问私有辅助函数
+    // 声明友元类,允许其访问私有成员
     friend class audio_sr_afe;
+    friend class audio_playback;
+    friend class audio_recorder;
 
     /**
      * @brief 构造函数
@@ -458,275 +360,104 @@ public:
      */
     esp_err_t audio_system_sleep();
 
-    /**
-     * @brief 录音测试
-     * 
-     * @param record_duration_ms 录音时长（毫秒）
-     * @return esp_err_t 返回操作结果
-     */
-    esp_err_t record_test(uint32_t record_duration_ms = 3000);
+    // ===== 录音方法（已迁移到 audio_recorder）=====
+    // 请使用 get_recorder()->xxx() 访问新接口
 
-    /**
-     * @brief 单次录音并播放测试
-     * 
-     * 此函数执行简单的录音-播放测试流程：
-     * 1. 录制指定时长的音频
-     * 2. 分析录制的音频数据（RMS、峰值等）
-     * 3. 播放刚录制的音频
-     * 
-     * 适用场景：
-     * - 快速验证麦克风和扬声器功能
-     * - 测试音频采集和播放质量
-     * - 检查录音延迟和音质
-     * 
-     * @param record_duration_seconds 录音时长（秒），默认3秒
-     * @return esp_err_t 返回操作结果
-     *         - ESP_OK: 测试成功
-     *         - ESP_ERR_INVALID_STATE: 音频设备未初始化
-     *         - ESP_ERR_NO_MEM: 内存分配失败
-     * 
-     * @note 录音和播放之间会有500ms的间隔
-     * @note 播放结束后会自动清空播放管线
-     * 
-     * @example
-     * ```cpp
-     * // 录音3秒并播放
-    * audio_tools::record_and_play_test(3);
-    * 
-    * // 录音5秒并播放
-    * audio_tools::record_and_play_test(5);
-     * ```
-     */
-    esp_err_t record_and_play_test(uint32_t record_duration_seconds = 3);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
-    /**
-     * @brief 单次录音并播放测试（支持TDM通道选择）
-     * 
-     * 此函数在TDM模式下录制多个麦克风的数据，然后只播放指定麦克风的音频。
-     * 
-     * 工作流程：
-     * 1. 录制完整的TDM多通道音频数据
-     * 2. 从录制的数据中提取指定麦克风通道
-     * 3. 分析提取的音频数据质量
-     * 4. 播放提取的单通道音频（可选，支持"干运行"模式）
-     * 
-     * 适用场景：
-     * - TDM模式下测试特定麦克风（如AUDIO_MIC_CHANNEL_123时测试MIC3）
-     * - 多麦克风阵列中单独验证每个麦克风
-     * - 麦克风性能对比测试
-     * - 快速分析音频质量而不播放（analysis_only=true）
-     * 
-     * @param record_duration_seconds 录音时长（秒），默认3秒
-     * @param target_mic_channel 目标麦克风通道（使用 audio_mic_channel_t 枚举值）
-     *                          - AUDIO_MIC_CHANNEL_1: MIC1
-     *                          - AUDIO_MIC_CHANNEL_2: MIC2
-     *                          - AUDIO_MIC_CHANNEL_3: MIC3
-     *                          - AUDIO_MIC_CHANNEL_4: MIC4
-     * @param analysis_only 仅分析模式（默认false=播放音频）
-     *                      - false: 正常模式，录音→提取→分析→播放
-     *                      - true: 干运行模式，录音→提取→分析（跳过播放）
-     * @return esp_err_t 返回操作结果
-     *         - ESP_OK: 测试成功
-     *         - ESP_ERR_INVALID_STATE: 音频设备未初始化或非TDM模式
-     *         - ESP_ERR_INVALID_ARG: 目标通道无效或未启用
-     *         - ESP_ERR_NO_MEM: 内存分配失败
-     * 
-     * @note 仅在TDM模式（3个或以上麦克风）下有效
-     * @note 在STEREO+TDM模式下，数据格式为8位采样
-     * @note 提取的通道会被转换为16位并扩展为立体声
-     * @note target_mic_channel必须是单一麦克风通道，不能是组合通道（如AUDIO_MIC_CHANNEL_12）
-     * @note analysis_only=true时不需要初始化ES8311播放设备
-     * 
-     * @example
-     * ```cpp
-    * // 初始化为TDM模式（3个麦克风）
-    * es7210_init(AUDIO_CHANNELS_3CHs, AUDIO_MIC_CHANNEL_123, ES7210_TDM_ENABLED);
-     * 
-     * // 正常模式：录音5秒并播放MIC3的音频
-     * record_and_play_test_with_channel_select(5, AUDIO_MIC_CHANNEL_3, false);
-     * 
-     * // 仅分析模式：录音5秒，分析MIC2数据，不播放（快速测试）
-     * record_and_play_test_with_channel_select(5, AUDIO_MIC_CHANNEL_2, true);
-     * 
-     * // 批量测试所有麦克风质量（无需播放）
-     * for (auto mic : {AUDIO_MIC_CHANNEL_1, AUDIO_MIC_CHANNEL_2, AUDIO_MIC_CHANNEL_3}) {
-     *     record_and_play_test_with_channel_select(3, mic, true);
-     * }
-     * ```
-     */
+    [[deprecated("Use get_recorder()->record_test()")]]
+    esp_err_t record_test(uint32_t record_duration_ms = 3000) {
+        return get_recorder()->record_test(record_duration_ms);
+    }
+
+    [[deprecated("Use get_recorder()->record_and_play_test()")]]
+    esp_err_t record_and_play_test(uint32_t record_duration_seconds = 3) {
+        return get_recorder()->record_and_play_test(record_duration_seconds);
+    }
+
+    [[deprecated("Use get_recorder()->record_and_play_test_with_channel_select()")]]
     esp_err_t record_and_play_test_with_channel_select(uint32_t record_duration_seconds = 3, 
                                                         audio_mic_channel_t target_mic_channel = AUDIO_MIC_CHANNEL_1,
-                                                        bool analysis_only = false);
+                                                        bool analysis_only = false) {
+        return get_recorder()->record_and_play_test_with_channel_select(record_duration_seconds, target_mic_channel, analysis_only);
+    }
 
-    /**
-     * @brief 录制所有启用的麦克风通道并分别保存为 PCM 文件
-     *
-     * 工作流程：
-     * 1. 录制指定时长的多通道原始数据
-     * 2. 调用 split_recorded_channels() 拆分为独立单声道缓冲
-     * 3. 生成通道质量统计并写入 SD/FATFS 文件
-     *
-     * @param record_duration_seconds 录音时长（秒）
-     * @param output_directory 输出目录（如 "/sdcard/logs"），若不存在则自动创建
-     * @param file_prefix 文件名前缀；传入 nullptr 或空串时使用默认前缀 "MIC"
-     * @return esp_err_t
-     *         - ESP_OK：成功写入至少一个通道文件
-     *         - 其他：失败原因（参数错误、初始化失败、内存不足、I/O 失败等）
-     *
-     * @note 未启用长文件名（CONFIG_FATFS_LFN_NONE）时，会自动转换为 8.3 文件名
-     * @note 写入的 PCM 数据为 16-bit 单声道，采样率与当前录音配置一致
-     */
+    [[deprecated("Use get_recorder()->record_all_channel_to_files()")]]
     esp_err_t record_all_channel_to_files(uint32_t record_duration_seconds,
                                           const char* output_directory,
-                                          const char* file_prefix = nullptr);
+                                          const char* file_prefix = nullptr) {
+        return get_recorder()->record_all_channel_to_files(record_duration_seconds, output_directory, file_prefix);
+    }
 
-    /**
-     * @brief 录音并播放录音内容测试
-     * 
-     * 使用简洁的实现方式，仿照示例代码结构
-     * @param record_duration_seconds 录音时长（秒）
-    * @param loop_playback 是否循环录音播放：
-    *                      false - 单次录音播放模式（录音N秒->播放录音内容）
-    *                      true  - 循环录音播放模式（录音N秒->播放N秒->录音N秒->播放N秒...）
-    * @param target_mic_channel 目标麦克风通道：
-    *                      - TDM模式下：指定要播放/分析的麦克风，AUDIO_MIC_NONE 表示自动选择第一个启用的通道
-    *                      - 标准I2S模式：忽略此参数，直接基于当前声道配置录音/播放
-     * @return esp_err_t 返回操作结果
-     */
+    [[deprecated("Use get_recorder()->record_and_playback_test()")]]
     esp_err_t record_and_playback_test(uint32_t record_duration_seconds = 5,
-                                bool loop_playback = false,
-                                audio_mic_channel_t target_mic_channel = AUDIO_MIC_NONE);
+                                       bool loop_playback = false,
+                                       audio_mic_channel_t target_mic_channel = AUDIO_MIC_NONE) {
+        return get_recorder()->record_and_playback_test(record_duration_seconds, loop_playback, target_mic_channel);
+    }
 
-    /**
-     * @brief 计算拆分后四个通道的质量指标
-     *
-     * @param split_result split_recorded_channels 的输出结构体
-     * @param quality 输出：4个通道对应的质量指标数组
-     */
+    [[deprecated("Use audio_recorder::compute_split_channel_quality()")]]
     static void compute_split_channel_quality(const channel_split_result_t& split_result,
-                                              mic_channel_quality_t quality[4]);
+                                              mic_channel_quality_t quality[4]) {
+        audio_recorder::compute_split_channel_quality(split_result, quality);
+    }
 
-    /**
-     * @brief 将录音缓冲区拆分为独立的麦克风通道
-     *
-     * 根据音频格式和麦克风配置，将交错的录音数据拆分为独立的单声道缓冲区。
-     * 支持标准立体声模式和TDM多通道模式。
-     *
-     * @param record_buffer 原始录音数据缓冲区
-     * @param bytes_read 录音数据字节数
-     * @param fs 音频采样信息（采样率、声道数、位深等）
-     * @param is_tdm_mode 是否为TDM模式
-     * @param mic_channels 启用的麦克风通道掩码
-     * @return channel_split_result_t 拆分结果（包含各通道的独立缓冲区）
-     *
-     * @note 返回的缓冲区需要调用 free_channel_split_result() 释放
-     * @note TDM模式下会自动处理8位到16位的转换
-     */
+    [[deprecated("Use audio_recorder::split_recorded_channels()")]]
     static channel_split_result_t split_recorded_channels(const uint8_t* record_buffer,
                                                           size_t bytes_read,
                                                           const esp_codec_dev_sample_info_t& fs,
                                                           bool is_tdm_mode,
-                                                          audio_mic_channel_t mic_channels);
+                                                          audio_mic_channel_t mic_channels) {
+        return audio_recorder::split_recorded_channels(record_buffer, bytes_read, fs, is_tdm_mode, mic_channels);
+    }
 
-    /**
-     * @brief 释放通道拆分结果中分配的缓冲区
-     *
-     * 释放 split_recorded_channels() 返回的 channel_split_result_t 中分配的所有内存。
-     * 此函数会检查并释放所有非空的 mic_buffers 指针。
-     *
-     * @param result 要释放的拆分结果引用
-     *
-     * @note 调用后 result 中的所有 mic_buffers 指针将被设置为 nullptr
-     * @note 安全调用：即使 result.status != ESP_OK 也可以安全调用
-     *
-     * @example
-     * ```cpp
-     * channel_split_result_t result = audio_tools::split_recorded_channels(...);
-     * if (result.status == ESP_OK) {
-     *     // 使用 result.mic_buffers[0], result.mic_buffers[1] 等
-     * }
-     * audio_tools::free_channel_split_result(result);  // 使用完毕后释放
-     * ```
-     */
-    static void free_channel_split_result(channel_split_result_t& result);
+    [[deprecated("Use audio_recorder::free_channel_split_result()")]]
+    static void free_channel_split_result(channel_split_result_t& result) {
+        audio_recorder::free_channel_split_result(result);
+    }
 
     // [已移除] 旧版 AEC 测试接口 aec_test()/test_aec_loopback() 已迁移到 audio_sr_afe 类。
     // 请使用 get_sr_afe()->aec_init()/aec_test_loopback()/aec_test() 进行 AEC 相关测试。
 
-    /**
-     * @brief 将录音数据保存到指定文件
-     *
-     * 在当前音频配置下采集指定时长的原始 PCM 数据，并写入到已经挂载的文件系统路径。
-     * @param filepath 目标文件的完整路径（例如 "/sdcard/recordings/test.pcm"）
-     * @param record_duration_seconds 录音时长（秒）
-     * @param chunk_size 每次从编解码器读取并写入文件的字节数，默认 4096
-     * @return esp_err_t
-     *         - ESP_OK：录音成功写入文件
-     *         - ESP_ERR_INVALID_STATE：音频系统或录音设备未初始化
-     *         - ESP_ERR_INVALID_ARG：参数非法
-     *         - ESP_ERR_TIMEOUT：录音在预期时间内未完成，文件为部分内容
-     *         - 其他：底层 I/O 或驱动错误
-     */
-    esp_err_t record_to_file(const char* filepath, uint32_t record_duration_seconds, size_t chunk_size = 4096);
+    [[deprecated("Use get_recorder()->record_to_file()")]]
+    esp_err_t record_to_file(const char* filepath, uint32_t record_duration_seconds, size_t chunk_size = 4096) {
+        return get_recorder()->record_to_file(filepath, record_duration_seconds, chunk_size);
+    }
 
-    /**
-     * @brief 播放指定类型的音频文件
-     *
-     * @param audio_type 要播放的音频文件类型
-     * @param mode 播放模式（阻塞或异步）
-     * @param duration_limit_seconds 播放时长限制（秒），0 表示播放完整文件
-     * @return esp_err_t 返回操作结果
-     */
-    esp_err_t play_audio_file(audio_file_type_t audio_type, audio_playback_mode_t mode = AUDIO_PLAYBACK_BLOCKING, float duration_limit_seconds = 0.0f);
+#pragma GCC diagnostic pop
 
-    /**
-     * @brief 播放内存中的音频缓冲区，支持自适应格式转换
-     * 
-     * 该函数可以播放任意格式的PCM音频数据，并自动转换为系统配置的格式
-     * 
-     * @param buffer 音频数据缓冲区指针
-     * @param buffer_size 缓冲区大小（字节）
-     * @param buffer_sample_rate_hz 缓冲区音频采样率（Hz）
-     * @param buffer_channels 缓冲区声道配置
-     * @param buffer_bits 缓冲区位深配置
-     * @param mode 播放模式（阻塞或异步）
-     * @param duration_limit_seconds 播放时长限制（秒），0 表示播放完整缓冲区
-     * @return esp_err_t 返回操作结果
-     *         - ESP_OK: 播放成功
-     *         - ESP_ERR_INVALID_ARG: 参数无效
-     *         - ESP_ERR_INVALID_STATE: 播放设备未就绪或已有异步任务运行
-     *         - ESP_ERR_NO_MEM: 内存分配失败
-     */
+    // ===== 播放方法（已迁移到 audio_playback）=====
+    // 请使用 get_playback()->xxx() 访问新接口
+
+    [[deprecated("Use get_playback()->play_audio_file()")]]
+    esp_err_t play_audio_file(audio_file_type_t audio_type, audio_playback_mode_t mode = AUDIO_PLAYBACK_BLOCKING, float duration_limit_seconds = 0.0f) {
+        return get_playback()->play_audio_file(audio_type, mode, duration_limit_seconds);
+    }
+
+    [[deprecated("Use get_playback()->play_audio_buffer()")]]
     esp_err_t play_audio_buffer(const uint8_t* buffer, size_t buffer_size, 
                                  uint32_t buffer_sample_rate_hz, audio_channels_t buffer_channels, 
                                  i2s_data_bit_width_t buffer_bits,
                                  audio_playback_mode_t mode = AUDIO_PLAYBACK_BLOCKING, 
-                                 float duration_limit_seconds = 0.0f);
+                                 float duration_limit_seconds = 0.0f) {
+        return get_playback()->play_audio_buffer(buffer, buffer_size, buffer_sample_rate_hz, buffer_channels, buffer_bits, mode, duration_limit_seconds);
+    }
 
-    /**
-    * @brief 查询是否存在正在运行的异步播放任务
-    *
-    * @return bool 返回异步播放任务是否正在运行
-    */
-    bool is_async_playback_running() const { return playback_task_handle != nullptr; }
+    [[deprecated("Use get_playback()->is_async_playback_running()")]]
+    bool is_async_playback_running() const {
+        return playback_ != nullptr && playback_->is_async_playback_running();
+    }
 
-    /**
-     * @brief 停止正在运行的异步播放任务
-     * 
-     * 强制停止当前正在运行的异步播放任务并清理音频管道
-     * @return esp_err_t 返回操作结果
-     *         - ESP_OK: 停止成功或没有运行的任务
-     *         - ESP_ERR_TIMEOUT: 任务停止超时
-     */
-    esp_err_t stop_async_playback();
+    [[deprecated("Use get_playback()->stop_async_playback()")]]
+    esp_err_t stop_async_playback() {
+        return get_playback()->stop_async_playback();
+    }
 
-    /**
-     * @brief 清理音频播放管道，发送静音数据清除残留音频
-     * 
-     * @param silence_duration_ms 静音持续时间（毫秒），默认100ms
-     * @return esp_err_t 返回操作结果
-     */
-    esp_err_t clear_audio_pipeline(uint32_t silence_duration_ms = 100);
+    [[deprecated("Use get_playback()->clear_audio_pipeline()")]]
+    esp_err_t clear_audio_pipeline(uint32_t silence_duration_ms = 100) {
+        return get_playback()->clear_audio_pipeline(silence_duration_ms);
+    }
 
     /**
      * @brief 获取播放设备句柄
@@ -790,35 +521,22 @@ public:
     void set_i2s_pin_config(gpio_num_t bck_pin, gpio_num_t mck_pin, gpio_num_t data_in_pin, 
                            gpio_num_t data_out_pin, gpio_num_t ws_pin, gpio_num_t pa_pin);
 
-    /**
-     * @brief 获取可用PCM测试文件的数量
-     * 
-     * @return int 返回可用的PCM测试文件数量
-     */
-    int get_available_pcm_count() const;
+    // ===== 音频文件信息方法（已迁移到 audio_playback）=====
 
-    /**
-     * @brief 获取音频文件的名称字符串
-     * 
-     * @param audio_type 音频文件类型
-     * @return const char* 返回音频文件名称
-     */
-    const char* get_audio_file_name(audio_file_type_t audio_type) const;
+    [[deprecated("Use get_playback()->get_available_pcm_count()")]]
+    int get_available_pcm_count() const {
+        return playback_ ? playback_->get_available_pcm_count() : 0;
+    }
 
-    /**
-     * @brief 检查指定音频文件是否可用
-     * 
-     * 统一的音频文件可用性检查接口，替代了之前的 is_pcm_xxx_available() 系列函数。
-     * 
-     * @param audio_type 音频文件类型
-     * @return bool 返回音频文件的可用状态
-     * 
-     * @note 音频文件命名规范（统一使用 AUDIO_ 前缀）:
-     *       - CMake option: ENABLE_AUDIO_XXX
-     *       - C++ 宏定义: USE_AUDIO_XXX
-     *       - 添加新文件时，只需在 CMakeLists.txt 的 AUDIO_FILE_CONFIGS 列表中添加一行即可
-     */
-    bool is_audio_file_available(audio_file_type_t audio_type) const;
+    [[deprecated("Use get_playback()->get_audio_file_name()")]]
+    const char* get_audio_file_name(audio_file_type_t audio_type) const {
+        return playback_ ? playback_->get_audio_file_name(audio_type) : "UNKNOWN";
+    }
+
+    [[deprecated("Use get_playback()->is_audio_file_available()")]]
+    bool is_audio_file_available(audio_file_type_t audio_type) const {
+        return playback_ ? playback_->is_audio_file_available(audio_type) : false;
+    }
 
     /**
      * @brief 设置 I2C 总线句柄（在调用各 codec init 前必须设置）
@@ -1062,6 +780,22 @@ public:
      * ```
      */
     audio_sr_afe* get_sr_afe();
+
+    /**
+     * @brief 获取播放子对象
+     * 
+     * 对象会在首次调用时自动创建。
+     * @return audio_playback* 播放子对象指针
+     */
+    audio_playback* get_playback();
+
+    /**
+     * @brief 获取录音子对象
+     * 
+     * 对象会在首次调用时自动创建。
+     * @return audio_recorder* 录音子对象指针
+     */
+    audio_recorder* get_recorder();
 
     // ========== 未来扩展接口示例 ==========
     // 为接入新的音频设备预留的接口框架

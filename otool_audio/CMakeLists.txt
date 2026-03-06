@@ -19,6 +19,8 @@ list(APPEND COMPILE_DEFS OTOOL_ENABLE_AUDIO)
 
 list(APPEND TOOLBOX_SRCS
     "${CMAKE_CURRENT_LIST_DIR}/audio_tools.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/audio_playback.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/audio_recorder.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/audio_chip_device/audio_es_es8311/audio_es_es8311.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/audio_chip_device/audio_es_es7210/audio_es_es7210.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/audio_sr_afe.cpp"

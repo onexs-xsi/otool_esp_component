@@ -52,4 +52,48 @@ typedef enum {
     AUDIO_MIC_CHANNEL_ALL = 0x0F              ///< 所有麦克风通道1+2+3+4
 } audio_mic_channel_t;
 
+/**
+ * @brief 音频文件枚举
+ * 
+ * 定义可播放的音频文件类型
+ */
+typedef enum {
+    AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S = 0,  ///< candy_wind 1通道 16000Hz 16bit 9.0秒
+    AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S,     ///< candy_wind 1通道 44100Hz 16bit 45.0秒
+    AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S,     ///< candy_wind 2通道 16000Hz 16bit 9.0秒
+    AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S,     ///< candy_wind 2通道 44100Hz 16bit 45.0秒
+    AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S,     ///< sine_440Hz 2通道 16000Hz 16bit 10.0秒
+    AUDIO_FILE_STARTUP_1CH_16K_16B_4S,     ///< startup 1通道 16000Hz 16bit 4.0秒
+    AUDIO_FILE_STARTUP_2CH_16K_16B_4S,     ///< startup 2通道 16000Hz 16bit 4.0秒
+    AUDIO_FILE_MAX                             ///< 枚举最大值（用于边界检查）
+} audio_file_type_t;
+
+/**
+ * @brief 音频播放模式
+ *
+ * 决定播放接口是阻塞执行还是创建后台任务异步播放
+ */
+typedef enum {
+    AUDIO_PLAYBACK_BLOCKING = 0, ///< 阻塞播放，函数调用完成后表示播放已结束
+    AUDIO_PLAYBACK_ASYNC         ///< 异步播放，立即返回并在后台任务中完成播放
+} audio_playback_mode_t;
+
+/**
+ * @brief 音频采样率枚举
+ * 
+ * 定义常用的音频采样率
+ */
+typedef enum {
+    AUDIO_SAMPLE_RATE_8K = 8000,      ///< 8kHz - 电话质量
+    AUDIO_SAMPLE_RATE_16K = 16000,    ///< 16kHz - 语音通话
+    AUDIO_SAMPLE_RATE_22K = 22050,    ///< 22.05kHz - FM广播质量
+    AUDIO_SAMPLE_RATE_32K = 32000,    ///< 32kHz - 数字广播
+    AUDIO_SAMPLE_RATE_44K1 = 44100,   ///< 44.1kHz - CD质量
+    AUDIO_SAMPLE_RATE_48K = 48000,    ///< 48kHz - 专业音频
+    AUDIO_SAMPLE_RATE_88K2 = 88200,   ///< 88.2kHz - 高保真
+    AUDIO_SAMPLE_RATE_96K = 96000,    ///< 96kHz - 高保真专业
+    AUDIO_SAMPLE_RATE_176K4 = 176400, ///< 176.4kHz - 超高保真
+    AUDIO_SAMPLE_RATE_192K = 192000   ///< 192kHz - 超高保真专业
+} audio_sample_rate_t;
+
 #endif // __AUDIO_TYPES_H__

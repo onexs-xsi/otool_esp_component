@@ -428,7 +428,7 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
 
     // 拆分通道
     audio_mic_channel_t enabled_mics = parent_->get_mic_channels();
-    channel_split_result_t split_result = audio_tools::split_recorded_channels(
+    channel_split_result_t split_result = audio_recorder::split_recorded_channels(
         record_buffer, bytes_read, fs, is_tdm_mode, enabled_mics);
 
     // 释放原始录音缓冲区
@@ -437,7 +437,7 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
 
     if (split_result.status != ESP_OK) {
         ESP_LOGE(TAG_AEC, "Failed to split channels: %s", esp_err_to_name(split_result.status));
-        audio_tools::free_channel_split_result(split_result);
+        audio_recorder::free_channel_split_result(split_result);
         return split_result.status;
     }
 
@@ -447,13 +447,13 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
 
     if (!original_mic_data) {
         ESP_LOGE(TAG_AEC, "Mic channel buffer is null");
-        audio_tools::free_channel_split_result(split_result);
+        audio_recorder::free_channel_split_result(split_result);
         return ESP_ERR_INVALID_STATE;
     }
 
     if (!reference_is_silent && !original_ref_data) {
         ESP_LOGE(TAG_AEC, "Reference channel buffer is null");
-        audio_tools::free_channel_split_result(split_result);
+        audio_recorder::free_channel_split_result(split_result);
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -473,7 +473,7 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
         float* mic_float = static_cast<float*>(heap_caps_malloc(sample_count * sizeof(float), MALLOC_CAP_SPIRAM));
         if (!mic_float) {
             ESP_LOGE(TAG_AEC, "Failed to allocate float buffer for MIC");
-            audio_tools::free_channel_split_result(split_result);
+            audio_recorder::free_channel_split_result(split_result);
             return ESP_ERR_NO_MEM;
         }
         for (size_t i = 0; i < sample_count; ++i) {
@@ -488,7 +488,7 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
         
         if (ret_res != ESP_OK || !resampled_mic) {
             ESP_LOGE(TAG_AEC, "Mic resample failed");
-            audio_tools::free_channel_split_result(split_result);
+            audio_recorder::free_channel_split_result(split_result);
             return ret_res;
         }
 
@@ -513,7 +513,7 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
             if (ref_res != ESP_OK || !resampled_ref) {
                 ESP_LOGE(TAG_AEC, "Ref resample failed");
                 heap_caps_free(mic_data_16k);
-                audio_tools::free_channel_split_result(split_result);
+                audio_recorder::free_channel_split_result(split_result);
                 return ref_res;
             }
 
@@ -541,7 +541,7 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
             heap_caps_free(mic_data_16k);
             if (ref_data_16k) heap_caps_free(ref_data_16k);
         }
-        audio_tools::free_channel_split_result(split_result);
+        audio_recorder::free_channel_split_result(split_result);
         return ESP_ERR_NO_MEM;
     }
 
@@ -577,7 +577,7 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
                 heap_caps_free(mic_data_16k);
                 if (ref_data_16k) heap_caps_free(ref_data_16k);
             }
-            audio_tools::free_channel_split_result(split_result);
+            audio_recorder::free_channel_split_result(split_result);
             return ESP_ERR_NO_MEM;
         }
     }
@@ -687,7 +687,7 @@ void audio_sr_afe::release_aec_buffers(aec_capture_output& output)
         heap_caps_free(output.aec_output);
         output.aec_output = nullptr;
     }
-    audio_tools::free_channel_split_result(output.split_result);
+    audio_recorder::free_channel_split_result(output.split_result);
     output.split_result = {};
     output.mic_data = nullptr;
     output.ref_data = nullptr;
@@ -902,7 +902,7 @@ esp_err_t audio_sr_afe::aec_session_start(size_t output_ringbuf_size,
     }
 
     // 检查与 record() 的互斥
-    if (parent_->is_async_playback_running()) {
+    if (parent_->get_playback() && parent_->get_playback()->is_async_playback_running()) {
         // 异步播放不影响录音通道，可以共存（不阻止）
     }
 
@@ -1048,14 +1048,14 @@ esp_err_t audio_sr_afe::aec_test_loopback(uint32_t record_duration_seconds,
             &stereo_size);
         
         if (ret == ESP_OK && stereo_buffer) {
-            ret = parent_->play_audio_buffer(
+            ret = parent_->get_playback()->play_audio_buffer(
                 stereo_buffer, stereo_size,
                 capture.fs.sample_rate, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT,
                 AUDIO_PLAYBACK_BLOCKING, 0.0f);
             heap_caps_free(stereo_buffer);
             
             if (ret == ESP_OK) {
-                parent_->clear_audio_pipeline(100);
+                parent_->get_playback()->clear_audio_pipeline(100);
                 vTaskDelay(pdMS_TO_TICKS(500));
             } else if (result == ESP_OK) {
                 result = ret;
@@ -1085,14 +1085,14 @@ esp_err_t audio_sr_afe::aec_test_loopback(uint32_t record_duration_seconds,
             &stereo_size);
         
         if (ret == ESP_OK && stereo_buffer) {
-            ret = parent_->play_audio_buffer(
+            ret = parent_->get_playback()->play_audio_buffer(
                 stereo_buffer, stereo_size,
                 capture.fs.sample_rate, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT,
                 AUDIO_PLAYBACK_BLOCKING, 0.0f);
             heap_caps_free(stereo_buffer);
             
             if (ret == ESP_OK) {
-                parent_->clear_audio_pipeline(100);
+                parent_->get_playback()->clear_audio_pipeline(100);
             } else if (result == ESP_OK) {
                 result = ret;
             }
