@@ -19,12 +19,12 @@
 # ============================================================================
 # 子组件开关（默认均为 OFF，确保拉取后只保留框架）
 # ============================================================================
-option(ENABLE_OTOOL_AUDIO      "Enable otool_audio subcomponent"      OFF)
-option(ENABLE_OTOOL_BMI270     "Enable otool_bmi270 subcomponent"     OFF)
-option(ENABLE_OTOOL_IR         "Enable otool_ir subcomponent"         OFF)
+option(ENABLE_OTOOL_AUDIO      "Enable otool_audio subcomponent"      ON)
+option(ENABLE_OTOOL_BMI270     "Enable otool_bmi270 subcomponent"     ON)
+option(ENABLE_OTOOL_IR         "Enable otool_ir subcomponent"         ON)
 option(ENABLE_OTOOL_POWER_IC   "Enable otool_power_ic subcomponent"   OFF)
-option(ENABLE_OTOOL_SD         "Enable otool_sd subcomponent"         OFF)
-option(ENABLE_OTOOL_RTC_RX8130 "Enable otool_ic_rx8130 subcomponent"  OFF)
+option(ENABLE_OTOOL_SD         "Enable otool_sd subcomponent"         ON)
+option(ENABLE_OTOOL_RTC_RX8130 "Enable otool_ic_rx8130 subcomponent"  ON)
 
 # ============================================================================
 # 音频文件嵌入配置（供 otool_audio/CMakeLists.txt 使用，由 toolkit.py 解析）
@@ -37,11 +37,11 @@ set(AUDIO_FILE_CONFIGS
     # ID:文件名:默认值:采样率:声道:位深:描述
     "AUDIO_CANDY_WIND_1CH_16K_16BIT_9S:candy_wind_pcm_1ch_16k_16bit_9s.pcm:OFF:16000:1:16:candy_wind 1ch 16000Hz 9.0s"
     "AUDIO_CANDY_WIND_1CH_44K_16BIT_45S:candy_wind_pcm_1ch_44.1k_16bit_45s.pcm:OFF:44100:1:16:candy_wind 1ch 44100Hz 45.0s"
-    "AUDIO_CANDY_WIND_2CH_16K_16BIT_9S:candy_wind_pcm_2ch_16k_16bit_9s.pcm:OFF:16000:2:16:candy_wind 2ch 16000Hz 9.0s"
+    "AUDIO_CANDY_WIND_2CH_16K_16BIT_9S:candy_wind_pcm_2ch_16k_16bit_9s.pcm:ON:16000:2:16:candy_wind 2ch 16000Hz 9.0s"
     "AUDIO_CANDY_WIND_2CH_44K_16BIT_45S:candy_wind_pcm_2ch_44.1k_16bit_45s.pcm:OFF:44100:2:16:candy_wind 2ch 44100Hz 45.0s"
     "AUDIO_SINE_440HZ_2CH_16K_16BIT_10S:sine_440Hz_pcm_2ch_16k_16bit_10s.pcm:OFF:16000:2:16:sine_440Hz 2ch 16000Hz 10.0s"
     "AUDIO_STARTUP_1CH_16K_16BIT_4S:startup_pcm_1ch_16k_16bit_4s.pcm:OFF:16000:1:16:startup 1ch 16000Hz 4.0s"
-    "AUDIO_STARTUP_2CH_16K_16BIT_4S:startup_pcm_2ch_16k_16bit_4s.pcm:OFF:16000:2:16:startup 2ch 16000Hz 4.0s"
+    "AUDIO_STARTUP_2CH_16K_16BIT_4S:startup_pcm_2ch_16k_16bit_4s.pcm:ON:16000:2:16:startup 2ch 16000Hz 4.0s"
 )
 
 # ============================================================================

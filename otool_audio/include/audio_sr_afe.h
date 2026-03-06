@@ -12,6 +12,10 @@
 #include "esp_afe_aec.h"
 #include "audio_types.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/ringbuf.h"
+
 // 前置声明,避免循环依赖
 class audio_tools;
 
@@ -19,6 +23,7 @@ class audio_tools;
  * @brief AEC (Acoustic Echo Cancellation) 运行时上下文
  * 
  * 存储当前 AEC 会话的配置和状态信息。
+ * aec_init/deinit 管理滤波器生命周期，session_start/stop 管理物理 I2S 采集 — 两层独立控制。
  */
 typedef struct {
     bool initialized;                      ///< AEC 是否已初始化
@@ -50,6 +55,21 @@ class audio_sr_afe {
 private:
     audio_tools* parent_;                  ///< 父对象指针(用于访问音频硬件接口)
     aec_runtime_context_t aec_ctx_;        ///< AEC 运行时上下文
+
+    // ===== 流式 AEC 会话状态 =====
+    TaskHandle_t session_task_handle_;     ///< 流式 AEC 后台任务句柄
+    RingbufHandle_t session_ringbuf_;      ///< 输出 RingBuffer（AEC 净化后的 PCM）
+    volatile bool session_stop_flag_;      ///< 任务停止标志（volatile 保证跨任务可见性）
+
+    /**
+     * @brief 流式 AEC 后台任务（静态入口）
+     *
+     * 持续从 I2S 读取 mic+ref TDM/STD 数据，拆通道、交织后调用
+     * afe_aec_process，将净化后音频写入 RingBuffer。
+     *
+     * @param param 指向 audio_sr_afe 实例的指针
+     */
+    static void aec_stream_task(void* param);
 
     /**
      * @brief 将麦克风通道枚举转换为索引
@@ -173,6 +193,59 @@ public:
      * @return bool true 表示已初始化
      */
     bool is_initialized() const { return aec_ctx_.initialized; }
+
+    // ===== 流式 AEC 会话 API =====
+
+    /**
+     * @brief 启动流式 AEC 会话（异步）
+     *
+     * 创建后台任务，持续从 I2S 读取 mic+ref，实时调用 afe_aec_process，
+     * 将净化后的音频写入内部 RingBuffer。
+     * 滤波器 handle 由 aec_init() 创建，跨 session 保留系数。
+     *
+     * 前提条件：
+     * - 必须已调用 aec_init() 完成 AEC 初始化
+     * - 系统采样率必须为 16kHz（AEC 硬性要求）
+     * - 不能与 record() 系列函数同时使用
+     *
+     * @param output_ringbuf_size  输出 RingBuffer 大小（字节），建议 16000*2*2 = 64KB
+     * @param task_priority        后台任务优先级，建议 configMAX_PRIORITIES-2
+     * @param task_stack_size      后台任务栈大小（字节），默认 8192
+     * @return ESP_OK / ESP_ERR_INVALID_STATE / ESP_ERR_NO_MEM
+     */
+    esp_err_t aec_session_start(size_t output_ringbuf_size   = 64 * 1024,
+                                UBaseType_t task_priority    = configMAX_PRIORITIES - 2,
+                                uint32_t task_stack_size     = 8192);
+
+    /**
+     * @brief 停止流式 AEC 会话
+     *
+     * 通知后台任务退出并等待其完成，释放 RingBuffer。
+     * AEC handle 及其滤波器系数**不受影响**，下次 start 时直接接续。
+     *
+     * @return ESP_OK / ESP_ERR_INVALID_STATE（会话未运行）
+     */
+    esp_err_t aec_session_stop();
+
+    /**
+     * @brief 从流式 AEC 会话读取已处理音频
+     *
+     * 从 RingBuffer 中读取 AEC 净化后的 PCM 数据（16-bit, 16kHz, 单声道）。
+     * 若 RingBuffer 中数据不足，阻塞至 timeout_ms 超时。
+     *
+     * @param buf        输出缓冲区
+     * @param len        期望读取字节数
+     * @param timeout_ms 超时（ms），0 = 非阻塞，portMAX_DELAY = 永久阻塞
+     * @return 实际读取字节数，0 表示超时无数据，-1 表示会话未启动
+     */
+    int aec_session_read(void* buf, size_t len, uint32_t timeout_ms = 100);
+
+    /**
+     * @brief 查询流式 AEC 会话是否正在运行
+     *
+     * @return true 后台任务仍在运行
+     */
+    bool aec_session_is_running() const;
 
     /**
      * @brief 获取当前 AEC 配置的麦克风通道

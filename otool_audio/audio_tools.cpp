@@ -334,16 +334,16 @@ channel_split_result_t audio_tools::split_recorded_channels(const uint8_t* recor
                 right_low = right_sample;
             }
 
-            if (result.mic_buffers[0]) {
+            if (result.mic_buffers[0]) {                 // MIC1 (LRCK Low, 第一槽)
                 result.mic_buffers[0][frame] = left_high;
             }
-            if (result.mic_buffers[2]) {
+            if (result.mic_buffers[2]) {                 // MIC3 (LRCK Low, 第二槽 - 奇数通道)
                 result.mic_buffers[2][frame] = left_low;
             }
-            if (result.mic_buffers[1]) {
+            if (result.mic_buffers[1]) {                 // MIC2 (LRCK High, 第一槽 - 偶数通道)
                 result.mic_buffers[1][frame] = right_high;
             }
-            if (result.mic_buffers[3]) {
+            if (result.mic_buffers[3]) {                 // MIC4 (LRCK High, 第二槽)
                 result.mic_buffers[3][frame] = right_low;
             }
         }
@@ -1152,6 +1152,12 @@ esp_err_t audio_tools::audio_system_sleep()
 
 esp_err_t audio_tools::record_test(uint32_t record_duration_ms)
 {
+    // S6: AEC 流式会话互斥保护
+    if (sr_afe_ && sr_afe_->aec_session_is_running()) {
+        ESP_LOGE(TAG, "Cannot record while AEC streaming session is active");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     const bool using_es8311_adc = es8311_initialized && es8311_has_adc_path() && (record_dev == es8311_dev_handle);
     const bool using_es7210_adc = es7210_initialized && !using_es8311_adc;
 
@@ -1270,6 +1276,12 @@ esp_err_t audio_tools::record_test(uint32_t record_duration_ms)
 
 esp_err_t audio_tools::record_and_play_test(uint32_t record_duration_seconds)
 {
+    // S6: AEC 流式会话互斥保护
+    if (sr_afe_ && sr_afe_->aec_session_is_running()) {
+        ESP_LOGE(TAG, "Cannot record while AEC streaming session is active");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     const bool capture_ready = (es7210_initialized && record_dev != nullptr) ||
                                (es8311_initialized && es8311_has_adc_path() && record_dev == es8311_dev_handle);
     const bool playback_ready = es8311_initialized && es8311_has_dac_path() && (play_dev != nullptr);
@@ -1498,6 +1510,12 @@ esp_err_t audio_tools::record_and_play_test(uint32_t record_duration_seconds)
 
 esp_err_t audio_tools::record_and_play_test_with_channel_select(uint32_t record_duration_seconds, audio_mic_channel_t target_mic_channel, bool analysis_only)
 {
+    // S6: AEC 流式会话互斥保护
+    if (sr_afe_ && sr_afe_->aec_session_is_running()) {
+        ESP_LOGE(TAG, "Cannot record while AEC streaming session is active");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     // 仅分析模式只需要ES7210初始化
     if (!es7210_initialized) {
         ESP_LOGE(TAG, "ES7210 not initialized");
@@ -1777,6 +1795,12 @@ esp_err_t audio_tools::record_all_channel_to_files(uint32_t record_duration_seco
                                                    const char* output_directory,
                                                    const char* file_prefix)
 {
+    // S6: AEC 流式会话互斥保护
+    if (sr_afe_ && sr_afe_->aec_session_is_running()) {
+        ESP_LOGE(TAG, "Cannot record while AEC streaming session is active");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     if (!es7210_initialized) {
         ESP_LOGE(TAG, "ES7210 not initialized");
         return ESP_ERR_INVALID_STATE;
@@ -2086,6 +2110,12 @@ esp_err_t audio_tools::record_and_playback_test(uint32_t record_duration_seconds
                                                 bool loop_playback,
                                                 audio_mic_channel_t target_mic_channel)
 {
+    // S6: AEC 流式会话互斥保护
+    if (sr_afe_ && sr_afe_->aec_session_is_running()) {
+        ESP_LOGE(TAG, "Cannot record while AEC streaming session is active");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     const bool capture_ready = (es7210_initialized && record_dev != nullptr) ||
                                (es8311_initialized && es8311_has_adc_path() && record_dev == es8311_dev_handle);
     const bool playback_ready = es8311_initialized && es8311_has_dac_path() && (play_dev != nullptr);
@@ -3422,6 +3452,12 @@ int audio_tools::count_selected_mics() const
 
 esp_err_t audio_tools::record_to_file(const char* filepath, uint32_t record_duration_seconds, size_t chunk_size)
 {
+    // S6: AEC 流式会话互斥保护
+    if (sr_afe_ && sr_afe_->aec_session_is_running()) {
+        ESP_LOGE(TAG, "Cannot record while AEC streaming session is active");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     const bool es8311_adc_ready = es8311_initialized && es8311_has_adc_path() && (record_dev == es8311_dev_handle);
     const bool es7210_adc_ready = es7210_initialized;
 

@@ -70,3 +70,26 @@ esp_err_t remix_convert_pcm_to_format(const uint8_t* input_data,
                                        audio_data_type_t target_type,
                                        uint8_t** output_data,
                                        size_t* output_size);
+
+/**
+ * @brief 线性插值重采样
+ *
+ * 将输入音频数据从 input_rate 重采样到 output_rate，支持多声道。
+ * 输出缓冲区由函数内部分配（SPIRAM 优先），调用方需用 heap_caps_free() 释放。
+ *
+ * @param input                      输入 float 音频数据
+ * @param input_samples_per_channel  每通道输入样本数
+ * @param channel_count              声道数
+ * @param input_rate                 输入采样率 (Hz)
+ * @param output_rate                输出采样率 (Hz)
+ * @param output                     输出: 重采样后缓冲区指针
+ * @param output_samples_per_channel 输出: 每通道输出样本数
+ * @return esp_err_t ESP_OK 表示成功
+ */
+esp_err_t resample_linear(const float* input,
+                          size_t input_samples_per_channel,
+                          uint32_t channel_count,
+                          uint32_t input_rate,
+                          uint32_t output_rate,
+                          float** output,
+                          size_t* output_samples_per_channel);

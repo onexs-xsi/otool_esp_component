@@ -332,16 +332,16 @@ channel_split_result_t audio_es_tools::split_recorded_channels(const uint8_t* re
                 right_low = right_sample;
             }
 
-            if (result.mic_buffers[0]) {
+            if (result.mic_buffers[0]) {                 // MIC1 (LRCK Low, 第一槽)
                 result.mic_buffers[0][frame] = left_high;
             }
-            if (result.mic_buffers[2]) {
+            if (result.mic_buffers[2]) {                 // MIC3 (LRCK Low, 第二槽 - 奇数通道)
                 result.mic_buffers[2][frame] = left_low;
             }
-            if (result.mic_buffers[1]) {
+            if (result.mic_buffers[1]) {                 // MIC2 (LRCK High, 第一槽 - 偶数通道)
                 result.mic_buffers[1][frame] = right_high;
             }
-            if (result.mic_buffers[3]) {
+            if (result.mic_buffers[3]) {                 // MIC4 (LRCK High, 第二槽)
                 result.mic_buffers[3][frame] = right_low;
             }
         }

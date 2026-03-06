@@ -176,6 +176,9 @@ static std::string make_short_name(const std::string& base, const std::string& s
 
 audio_sr_afe::audio_sr_afe(audio_tools* parent)
     : parent_(parent)
+    , session_task_handle_(nullptr)
+    , session_ringbuf_(nullptr)
+    , session_stop_flag_(false)
 {
     // 初始化 AEC 上下文
     aec_ctx_.initialized = false;
@@ -301,6 +304,12 @@ esp_err_t audio_sr_afe::aec_deinit()
         return ESP_OK;
     }
 
+    // S7: 若流式会话正在运行，先自动停止
+    if (aec_session_is_running()) {
+        ESP_LOGW(TAG_AEC, "AEC session still running during deinit, stopping...");
+        aec_session_stop();
+    }
+
     if (aec_ctx_.handle) {
         afe_aec_destroy(aec_ctx_.handle);
         aec_ctx_.handle = nullptr;
@@ -324,6 +333,12 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
 
     if (!parent_) {
         ESP_LOGE(TAG_AEC, "Parent audio_tools object is null");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // S6: 批处理模式与流式会话互斥
+    if (aec_session_is_running()) {
+        ESP_LOGE(TAG_AEC, "Cannot use batch capture while AEC streaming session is active");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -427,29 +442,105 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
     }
 
     // 获取麦克风和参考信号
-    int16_t* mic_data = split_result.mic_buffers[mic_index];
-    int16_t* ref_data = reference_is_silent ? nullptr : split_result.mic_buffers[ref_index];
+    int16_t* original_mic_data = split_result.mic_buffers[mic_index];
+    int16_t* original_ref_data = reference_is_silent ? nullptr : split_result.mic_buffers[ref_index];
 
-    if (!mic_data) {
+    if (!original_mic_data) {
         ESP_LOGE(TAG_AEC, "Mic channel buffer is null");
         audio_tools::free_channel_split_result(split_result);
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (!reference_is_silent && !ref_data) {
+    if (!reference_is_silent && !original_ref_data) {
         ESP_LOGE(TAG_AEC, "Reference channel buffer is null");
         audio_tools::free_channel_split_result(split_result);
         return ESP_ERR_INVALID_STATE;
     }
 
-    const size_t sample_count = split_result.samples_per_channel;
+    size_t sample_count = split_result.samples_per_channel;
     ESP_LOGI(TAG_AEC, "Channel split successful: %zu samples per channel", sample_count);
 
-    // 分配 AEC 输出缓冲区
-    int16_t* aec_output = static_cast<int16_t*>(heap_caps_aligned_alloc(
+    // ================== 重采样适配 (如果当前系统采样率不是 16kHz) ==================
+    int16_t* mic_data_16k = nullptr;
+    int16_t* ref_data_16k = nullptr;
+    const uint32_t aec_required_rate = 16000;
+    const bool need_resample = (fs.sample_rate != aec_required_rate);
+
+    if (need_resample) {
+        ESP_LOGI(TAG_AEC, "Resampling from %lu Hz to %lu Hz for AEC processing...", fs.sample_rate, aec_required_rate);
+        
+        // 1. 转为 float，这是 resample_linear 的输入要求
+        float* mic_float = static_cast<float*>(heap_caps_malloc(sample_count * sizeof(float), MALLOC_CAP_SPIRAM));
+        if (!mic_float) {
+            ESP_LOGE(TAG_AEC, "Failed to allocate float buffer for MIC");
+            audio_tools::free_channel_split_result(split_result);
+            return ESP_ERR_NO_MEM;
+        }
+        for (size_t i = 0; i < sample_count; ++i) {
+            mic_float[i] = static_cast<float>(original_mic_data[i]);
+        }
+
+        // 调用重采样
+        float* resampled_mic = nullptr;
+        size_t new_sample_count = 0;
+        esp_err_t ret_res = resample_linear(mic_float, sample_count, 1, fs.sample_rate, aec_required_rate, &resampled_mic, &new_sample_count);
+        heap_caps_free(mic_float);
+        
+        if (ret_res != ESP_OK || !resampled_mic) {
+            ESP_LOGE(TAG_AEC, "Mic resample failed");
+            audio_tools::free_channel_split_result(split_result);
+            return ret_res;
+        }
+
+        // 转回 int16_t
+        mic_data_16k = static_cast<int16_t*>(heap_caps_malloc(new_sample_count * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+        for (size_t i = 0; i < new_sample_count; ++i) {
+            mic_data_16k[i] = static_cast<int16_t>(resampled_mic[i]); // 忽略极端的钳位由于这里原本就是int16上来
+        }
+        heap_caps_free(resampled_mic);
+
+        // 如果包含参考信号，也要对其进行相同的重采样
+        if (!reference_is_silent) {
+            float* ref_float = static_cast<float*>(heap_caps_malloc(sample_count * sizeof(float), MALLOC_CAP_SPIRAM));
+            for (size_t i = 0; i < sample_count; ++i) {
+                ref_float[i] = static_cast<float>(original_ref_data[i]);
+            }
+            float* resampled_ref = nullptr;
+            size_t new_ref_count = 0;
+            esp_err_t ref_res = resample_linear(ref_float, sample_count, 1, fs.sample_rate, aec_required_rate, &resampled_ref, &new_ref_count);
+            heap_caps_free(ref_float);
+            
+            if (ref_res != ESP_OK || !resampled_ref) {
+                ESP_LOGE(TAG_AEC, "Ref resample failed");
+                heap_caps_free(mic_data_16k);
+                audio_tools::free_channel_split_result(split_result);
+                return ref_res;
+            }
+
+            ref_data_16k = static_cast<int16_t*>(heap_caps_malloc(new_ref_count * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+            for (size_t i = 0; i < new_ref_count; ++i) {
+                ref_data_16k[i] = static_cast<int16_t>(resampled_ref[i]);
+            }
+            heap_caps_free(resampled_ref);
+        }
+
+        sample_count = new_sample_count; // 更新后样本数
+    } else {
+        // 不需要重采样，直接使用拆分出来的缓冲区
+        mic_data_16k = original_mic_data;
+        ref_data_16k = original_ref_data;
+    }
+    // ==============================================================================================
+
+    // 分配 AEC 输出缓冲区 (现在永远是 16000Hz 频率的大小了)
+    int16_t* aec_output_16k = static_cast<int16_t*>(heap_caps_aligned_alloc(
         16, sample_count * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (!aec_output) {
+    if (!aec_output_16k) {
         ESP_LOGE(TAG_AEC, "Failed to allocate AEC output buffer");
+        if (need_resample) {
+            heap_caps_free(mic_data_16k);
+            if (ref_data_16k) heap_caps_free(ref_data_16k);
+        }
         audio_tools::free_channel_split_result(split_result);
         return ESP_ERR_NO_MEM;
     }
@@ -462,7 +553,7 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
     TaskWdtGuard wdt_guard;
 #endif
 
-    size_t frame_size = 160;  // 默认 10ms 帧
+    size_t frame_size = 160;  // 默认对16kHz来说，10ms帧是160个采样
     if (!reference_is_silent && aec_ctx_.handle) {
         const int chunksize = afe_aec_get_chunksize(aec_ctx_.handle);
         if (chunksize > 0) {
@@ -481,16 +572,20 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
             16, frame_size * nch * sizeof(int16_t), MALLOC_CAP_DEFAULT | MALLOC_CAP_8BIT));
         if (!aec_input) {
             ESP_LOGE(TAG_AEC, "Failed to allocate AEC input buffer");
-            heap_caps_free(aec_output);
+            heap_caps_free(aec_output_16k);
+            if (need_resample) {
+                heap_caps_free(mic_data_16k);
+                if (ref_data_16k) heap_caps_free(ref_data_16k);
+            }
             audio_tools::free_channel_split_result(split_result);
             return ESP_ERR_NO_MEM;
         }
     }
 
     for (size_t offset = 0; offset + frame_size <= sample_count; offset += frame_size) {
-        int16_t* mic_frame = mic_data + offset;
-        int16_t* ref_frame = reference_is_silent ? nullptr : (ref_data + offset);
-        int16_t* out_frame = aec_output + offset;
+        int16_t* mic_frame = mic_data_16k + offset;
+        int16_t* ref_frame = reference_is_silent ? nullptr : (ref_data_16k + offset);
+        int16_t* out_frame = aec_output_16k + offset;
 
         if (reference_is_silent) {
             // 无参考信号，直接复制
@@ -530,7 +625,7 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
     // 处理剩余样本（如果有）
     if (processed_samples < sample_count) {
         const size_t remaining = sample_count - processed_samples;
-        memcpy(aec_output + processed_samples, mic_data + processed_samples, 
+        memcpy(aec_output_16k + processed_samples, mic_data_16k + processed_samples,
                remaining * sizeof(int16_t));
     }
 
@@ -539,11 +634,47 @@ esp_err_t audio_sr_afe::capture_aec_buffers(uint32_t record_duration_seconds,
     ESP_LOGI(TAG_AEC, "AEC processing complete: %zu samples in %.3f seconds",
              processed_samples, aec_duration);
 
+    // ================== 如果存在重采样，将处理完的干声转回原始系统采样率 ==================
+    int16_t* final_aec_output = aec_output_16k;
+    size_t final_sample_count = sample_count;
+
+    if (need_resample) {
+        ESP_LOGI(TAG_AEC, "Resampling AEC output back from %lu Hz to %lu Hz...", aec_required_rate, fs.sample_rate);
+        float* aec_float = static_cast<float*>(heap_caps_malloc(sample_count * sizeof(float), MALLOC_CAP_SPIRAM));
+        for (size_t i = 0; i < sample_count; ++i) {
+            aec_float[i] = static_cast<float>(aec_output_16k[i]);
+        }
+        
+        float* resampled_aec = nullptr;
+        esp_err_t back_res = resample_linear(aec_float, sample_count, 1, aec_required_rate, fs.sample_rate, &resampled_aec, &final_sample_count);
+        heap_caps_free(aec_float);
+
+        if (back_res != ESP_OK || !resampled_aec) {
+            ESP_LOGE(TAG_AEC, "AEC output resample back failed");
+            // 作为fallback，还是返回16k的就算了，外层可能播放会快一点
+        } else {
+            final_aec_output = static_cast<int16_t*>(heap_caps_aligned_alloc(16, final_sample_count * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            for (size_t i = 0; i < final_sample_count; ++i) {
+                final_aec_output[i] = static_cast<int16_t>(resampled_aec[i]);
+            }
+            heap_caps_free(resampled_aec);
+            heap_caps_free(aec_output_16k); // 释放降采过的
+        }
+
+        // 清理因为输入重采样而中途分配的临时缓冲
+        heap_caps_free(mic_data_16k);
+        if (ref_data_16k) {
+            heap_caps_free(ref_data_16k);
+        }
+    }
+    // ==================================================================================
+
+    // 此时 output 里存的是系统原始要求的那些通道信息，便于播放和保存
     output.split_result = split_result;
-    output.mic_data = mic_data;
-    output.ref_data = reference_is_silent ? nullptr : ref_data;
-    output.aec_output = aec_output;
-    output.sample_count = sample_count;
+    output.mic_data = original_mic_data;
+    output.ref_data = reference_is_silent ? nullptr : original_ref_data;
+    output.aec_output = final_aec_output;
+    output.sample_count = final_sample_count;
     output.fs = fs;
     output.reference_is_silent = reference_is_silent;
 
@@ -564,6 +695,318 @@ void audio_sr_afe::release_aec_buffers(aec_capture_output& output)
     output.fs = {};
     output.reference_is_silent = true;
 }
+
+// ========== 流式 AEC 会话 ==========
+
+void audio_sr_afe::aec_stream_task(void* param)
+{
+    audio_sr_afe* self = static_cast<audio_sr_afe*>(param);
+    audio_tools* parent = self->parent_;
+
+    ESP_LOGI(TAG_AEC, "AEC stream task started");
+
+    // --- 获取 AEC 帧大小 ---
+    const int chunksize = afe_aec_get_chunksize(self->aec_ctx_.handle);
+    if (chunksize <= 0) {
+        ESP_LOGE(TAG_AEC, "Invalid AEC chunksize: %d", chunksize);
+        self->session_task_handle_ = nullptr;
+        vTaskDelete(nullptr);
+        return;
+    }
+    ESP_LOGI(TAG_AEC, "AEC chunksize: %d samples (%.1f ms)", chunksize, chunksize * 1000.0f / 16000.0f);
+
+    // --- 硬件参数 ---
+    esp_codec_dev_handle_t record_dev = parent->get_record_device_handle();
+    const bool is_tdm = parent->is_es7210_tdm_mode();
+    const uint32_t hw_bits = static_cast<uint32_t>(parent->get_bits_per_sample());
+    const uint32_t hw_channels = (parent->get_rx_channels() == AUDIO_CHANNELS_MONO) ? 1 : 2;
+    const size_t bytes_per_hw_frame = (hw_bits / 8) * hw_channels;
+
+    const int mic_idx = mic_channel_to_index(self->aec_ctx_.mic_channel);
+    const bool ref_silent = (self->aec_ctx_.reference_channel == AUDIO_MIC_NONE);
+    const int ref_idx = ref_silent ? -1 : mic_channel_to_index(self->aec_ctx_.reference_channel);
+
+    // --- 分配缓冲区 ---
+    // I2S 读取缓冲: chunksize 个 TDM/STD 帧
+    const size_t read_buf_size = static_cast<size_t>(chunksize) * bytes_per_hw_frame;
+    uint8_t* read_buf = static_cast<uint8_t*>(heap_caps_malloc(read_buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+    if (!read_buf) {
+        // DMA 内存不足时回退到 SPIRAM
+        read_buf = static_cast<uint8_t*>(heap_caps_malloc(read_buf_size, MALLOC_CAP_SPIRAM));
+    }
+
+    // AEC 交织输入缓冲 (mic + ref 交错, 每帧 2 个 int16_t)
+    const size_t aec_nch = ref_silent ? 1 : 2;
+    int16_t* aec_input = static_cast<int16_t*>(heap_caps_aligned_alloc(
+        16, chunksize * aec_nch * sizeof(int16_t), MALLOC_CAP_DEFAULT | MALLOC_CAP_8BIT));
+
+    // AEC 输出缓冲
+    int16_t* aec_output = static_cast<int16_t*>(heap_caps_aligned_alloc(
+        16, chunksize * sizeof(int16_t), MALLOC_CAP_DEFAULT | MALLOC_CAP_8BIT));
+
+    if (!read_buf || !aec_input || !aec_output) {
+        ESP_LOGE(TAG_AEC, "Failed to allocate stream buffers (read=%p, input=%p, output=%p)",
+                 read_buf, aec_input, aec_output);
+        if (read_buf) heap_caps_free(read_buf);
+        if (aec_input) heap_caps_free(aec_input);
+        if (aec_output) heap_caps_free(aec_output);
+        self->session_task_handle_ = nullptr;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    size_t total_frames_processed = 0;
+    size_t ringbuf_overflow_count = 0;
+
+    // --- 主循环 ---
+    while (!self->session_stop_flag_) {
+        // 1) 从 I2S 读取一帧数据 (阻塞式)
+        esp_err_t ret = esp_codec_dev_read(record_dev, read_buf, static_cast<int>(read_buf_size));
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG_AEC, "I2S read failed: %s, retrying...", esp_err_to_name(ret));
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
+
+        // 2) 拆通道: 从 TDM/STD 数据中提取 mic 和 ref 通道
+        if (is_tdm && (hw_bits == 32) && (hw_channels == 2)) {
+            // TDM 32-bit 双槽模式:
+            // left_word:  MIC1(high16) | MIC3(low16)
+            // right_word: MIC2(high16) | MIC4(low16)
+            const uint32_t* frames = reinterpret_cast<const uint32_t*>(read_buf);
+            for (int i = 0; i < chunksize; ++i) {
+                uint32_t left_word  = frames[i * 2];
+                uint32_t right_word = frames[i * 2 + 1];
+
+                int16_t mic_samples[4] = {
+                    static_cast<int16_t>(left_word >> 16),      // MIC1
+                    static_cast<int16_t>(right_word >> 16),     // MIC2
+                    static_cast<int16_t>(left_word & 0xFFFF),   // MIC3
+                    static_cast<int16_t>(right_word & 0xFFFF)   // MIC4
+                };
+
+                if (ref_silent) {
+                    aec_input[i] = mic_samples[mic_idx];
+                } else {
+                    aec_input[i * 2]     = mic_samples[mic_idx];
+                    aec_input[i * 2 + 1] = mic_samples[ref_idx];
+                }
+            }
+        } else if (!is_tdm && (hw_channels == 2)) {
+            // 标准立体声模式: [left][right] 交错
+            const size_t slot_bytes = hw_bits / 8;
+            for (int i = 0; i < chunksize; ++i) {
+                const uint8_t* frame_ptr = read_buf + i * bytes_per_hw_frame;
+                int16_t left_sample, right_sample;
+
+                if (slot_bytes == 4) {
+                    // 32-bit 槽: 取高 16 位作为有效数据
+                    int32_t left_raw  = *reinterpret_cast<const int32_t*>(frame_ptr);
+                    int32_t right_raw = *reinterpret_cast<const int32_t*>(frame_ptr + 4);
+                    left_sample  = static_cast<int16_t>(left_raw >> 16);
+                    right_sample = static_cast<int16_t>(right_raw >> 16);
+                } else {
+                    left_sample  = *reinterpret_cast<const int16_t*>(frame_ptr);
+                    right_sample = *reinterpret_cast<const int16_t*>(frame_ptr + slot_bytes);
+                }
+
+                int16_t ch_data[2] = { left_sample, right_sample };
+                if (ref_silent) {
+                    aec_input[i] = ch_data[mic_idx < 2 ? mic_idx : 0];
+                } else {
+                    aec_input[i * 2]     = ch_data[mic_idx < 2 ? mic_idx : 0];
+                    aec_input[i * 2 + 1] = ch_data[ref_idx < 2 ? ref_idx : 0];
+                }
+            }
+        } else {
+            // 不支持的配置: 单声道或其他,仅复制零
+            memset(aec_input, 0, chunksize * aec_nch * sizeof(int16_t));
+            if (total_frames_processed == 0) {
+                ESP_LOGW(TAG_AEC, "Unsupported I2S config for streaming (tdm=%d, bits=%lu, ch=%lu)",
+                         is_tdm, static_cast<unsigned long>(hw_bits), static_cast<unsigned long>(hw_channels));
+            }
+        }
+
+        // 3) AEC 处理
+        if (!ref_silent && self->aec_ctx_.handle) {
+            afe_aec_process(self->aec_ctx_.handle, aec_input, aec_output);
+        } else {
+            // 无参考信号: 直接透传 mic 数据
+            if (ref_silent) {
+                memcpy(aec_output, aec_input, chunksize * sizeof(int16_t));
+            } else {
+                // handle 为 null（理论不应出现）
+                for (int i = 0; i < chunksize; ++i) {
+                    aec_output[i] = aec_input[i * 2];
+                }
+            }
+        }
+
+        // 4) 写入 RingBuffer
+        BaseType_t rb_ret = xRingbufferSend(self->session_ringbuf_, aec_output,
+                                            chunksize * sizeof(int16_t), pdMS_TO_TICKS(50));
+        if (rb_ret != pdTRUE) {
+            ++ringbuf_overflow_count;
+            if ((ringbuf_overflow_count & 0x3F) == 1) {
+                ESP_LOGW(TAG_AEC, "RingBuffer overflow (count=%zu), reader too slow",
+                         ringbuf_overflow_count);
+            }
+        }
+
+        ++total_frames_processed;
+    }
+
+    // --- 退出清理 ---
+    heap_caps_free(read_buf);
+    heap_caps_free(aec_input);
+    heap_caps_free(aec_output);
+
+    ESP_LOGI(TAG_AEC, "AEC stream task exiting (processed %zu frames, %zu overflows)",
+             total_frames_processed, ringbuf_overflow_count);
+
+    self->session_task_handle_ = nullptr;
+    vTaskDelete(nullptr);
+}
+
+esp_err_t audio_sr_afe::aec_session_start(size_t output_ringbuf_size,
+                                           UBaseType_t task_priority,
+                                           uint32_t task_stack_size)
+{
+    if (aec_session_is_running()) {
+        ESP_LOGW(TAG_AEC, "AEC session already running");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!aec_ctx_.initialized) {
+        ESP_LOGE(TAG_AEC, "AEC not initialized. Call aec_init() first.");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!parent_) {
+        ESP_LOGE(TAG_AEC, "Parent audio_tools is null");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!parent_->is_es7210_initialized() || !parent_->get_record_device_handle()) {
+        ESP_LOGE(TAG_AEC, "Recording path not ready");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 检查采样率: AEC 硬性要求 16kHz
+    const uint32_t hw_rate = static_cast<uint32_t>(parent_->get_sample_rate());
+    if (hw_rate != 16000) {
+        ESP_LOGE(TAG_AEC, "Streaming AEC requires 16kHz sample rate (current: %lu Hz). "
+                 "Use batch mode (capture_aec_buffers) for non-16kHz configurations.",
+                 static_cast<unsigned long>(hw_rate));
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 检查与 record() 的互斥
+    if (parent_->is_async_playback_running()) {
+        // 异步播放不影响录音通道，可以共存（不阻止）
+    }
+
+    // 创建 RingBuffer
+    session_ringbuf_ = xRingbufferCreate(output_ringbuf_size, RINGBUF_TYPE_BYTEBUF);
+    if (!session_ringbuf_) {
+        ESP_LOGE(TAG_AEC, "Failed to create RingBuffer (%zu bytes)", output_ringbuf_size);
+        return ESP_ERR_NO_MEM;
+    }
+
+    // 启动后台任务
+    session_stop_flag_ = false;
+    BaseType_t ret = xTaskCreatePinnedToCore(
+        aec_stream_task,
+        "aec_stream",
+        task_stack_size,
+        this,
+        task_priority,
+        &session_task_handle_,
+        1  // 固定在 CPU Core 1，避免影响主线程和 LVGL
+    );
+
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG_AEC, "Failed to create AEC stream task");
+        vRingbufferDelete(session_ringbuf_);
+        session_ringbuf_ = nullptr;
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG_AEC, "AEC streaming session started (ringbuf=%zuKB, priority=%u, stack=%luB)",
+             output_ringbuf_size / 1024, task_priority, static_cast<unsigned long>(task_stack_size));
+    return ESP_OK;
+}
+
+esp_err_t audio_sr_afe::aec_session_stop()
+{
+    if (!aec_session_is_running()) {
+        ESP_LOGW(TAG_AEC, "AEC session not running");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG_AEC, "Stopping AEC streaming session...");
+
+    // 通知任务退出
+    session_stop_flag_ = true;
+
+    // 等待任务自行退出 (最多等 3 秒)
+    const int max_wait_ms = 3000;
+    const int poll_interval_ms = 50;
+    int waited_ms = 0;
+    while (session_task_handle_ != nullptr && waited_ms < max_wait_ms) {
+        vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
+        waited_ms += poll_interval_ms;
+    }
+
+    if (session_task_handle_ != nullptr) {
+        ESP_LOGW(TAG_AEC, "AEC stream task did not exit within %d ms, force deleting", max_wait_ms);
+        vTaskDelete(session_task_handle_);
+        session_task_handle_ = nullptr;
+    }
+
+    // 释放 RingBuffer
+    if (session_ringbuf_) {
+        vRingbufferDelete(session_ringbuf_);
+        session_ringbuf_ = nullptr;
+    }
+
+    session_stop_flag_ = false;
+
+    ESP_LOGI(TAG_AEC, "AEC streaming session stopped (AEC filter coefficients preserved)");
+    return ESP_OK;
+}
+
+int audio_sr_afe::aec_session_read(void* buf, size_t len, uint32_t timeout_ms)
+{
+    if (!aec_session_is_running() || !session_ringbuf_) {
+        return -1;
+    }
+
+    if (!buf || len == 0) {
+        return 0;
+    }
+
+    // RingBuffer BYTEBUF 模式: 一次性读取最多 len 字节
+    size_t item_size = 0;
+    TickType_t ticks = (timeout_ms == UINT32_MAX) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+    void* item = xRingbufferReceiveUpTo(session_ringbuf_, &item_size, ticks, len);
+
+    if (!item || item_size == 0) {
+        return 0;
+    }
+
+    memcpy(buf, item, item_size);
+    vRingbufferReturnItem(session_ringbuf_, item);
+
+    return static_cast<int>(item_size);
+}
+
+bool audio_sr_afe::aec_session_is_running() const
+{
+    return session_task_handle_ != nullptr;
+}
+
+// ========== 批处理 AEC 测试接口 ==========
 
 esp_err_t audio_sr_afe::aec_test_loopback(uint32_t record_duration_seconds,
                                           bool play_original_audio,

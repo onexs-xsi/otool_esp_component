@@ -146,6 +146,8 @@ void convert_from_float(const float* input, size_t total_samples,
 	}
 }
 
+} // end anonymous namespace (temporarily close for resample_linear)
+
 esp_err_t resample_linear(const float* input,
 						  size_t input_samples_per_channel,
 						  uint32_t channel_count,
@@ -203,6 +205,8 @@ esp_err_t resample_linear(const float* input,
 	*output_samples_per_channel = estimated_samples;
 	return ESP_OK;
 }
+
+namespace { // reopen anonymous namespace for remaining internal helpers
 
 esp_err_t convert_channels(const float* input,
 						   size_t samples_per_channel,
