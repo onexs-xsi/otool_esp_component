@@ -87,11 +87,10 @@ static void IRAM_ATTR rx8130_gpio_isr_handler(void* arg)
 
 bool rx8130_tools::init(i2c_master_bus_handle_t busHandle, uint8_t addr, gpio_num_t int_pin)
 {
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = addr,
-        .scl_speed_hz    = 400000,
-    };
+    i2c_device_config_t dev_cfg = {};
+    dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    dev_cfg.device_address  = addr;
+    dev_cfg.scl_speed_hz    = 400000;
     ESP_ERROR_CHECK(i2c_master_bus_add_device(busHandle, &dev_cfg, &_i2c_device_handle));
 
     if (_i2c_device_handle == NULL) {

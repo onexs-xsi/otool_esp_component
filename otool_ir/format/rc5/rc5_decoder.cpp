@@ -53,33 +53,42 @@ private:
             uint32_t d0 = symbols[i].duration0;
             uint32_t d1 = symbols[i].duration1;
             
-            ESP_LOGI(TAG, "  [%zu] l0=%u l1=%u d0=%u d1=%u", 
-                     i, symbols[i].level0, symbols[i].level1, d0, d1);
+            ESP_LOGI(TAG, "  [%zu] l0=%u l1=%u d0=%u d1=%u",
+                     i,
+                     static_cast<unsigned>(symbols[i].level0),
+                     static_cast<unsigned>(symbols[i].level1),
+                     static_cast<unsigned>(d0),
+                     static_cast<unsigned>(d1));
             
             if (rc5_bit_match(d0, RC5_HALF_BIT_US)) {
                 code = (code << 1) | (c ? 1 : 0);
                 c = rc5_bit_match(d1, RC5_FULL) ? !c : c;
-                ESP_LOGI(TAG, "    half: bit=%u -> 0x%X", (c?1:0), code);
+                ESP_LOGI(TAG, "    half: bit=%u -> 0x%X",
+                         static_cast<unsigned>(c ? 1 : 0),
+                         static_cast<unsigned>(code));
             } else if (rc5_bit_match(d0, RC5_FULL)) {
                 uint32_t two_bits = (symbols[i].level0 << 1) | (!symbols[i].level0 ? 1 : 0);
                 code = (code << 2) | two_bits;
                 c = rc5_bit_match(d1, RC5_HALF_BIT_US) ? !c : c;
                 ESP_LOGI(TAG, "    full: l0=%u bits=0b%u%u -> 0x%X",
-                         symbols[i].level0, (two_bits>>1)&1, two_bits&1, code);
+                         static_cast<unsigned>(symbols[i].level0),
+                         static_cast<unsigned>((two_bits >> 1) & 1),
+                         static_cast<unsigned>(two_bits & 1),
+                         static_cast<unsigned>(code));
             } else {
-                ESP_LOGW(TAG, "    invalid d0=%u", d0);
+                ESP_LOGW(TAG, "    invalid d0=%u", static_cast<unsigned>(d0));
                 return false;
             }
         }
         
         // 参考代码的rc5_check直接返回code，不验证位数
         // 位数验证通过起始位检查来完成
-        ESP_LOGI(TAG, "RC5 decoded: code=0x%X", code);
+        ESP_LOGI(TAG, "RC5 decoded: code=0x%X", static_cast<unsigned>(code));
         
         uint16_t frame_bits = static_cast<uint16_t>(code);
 
         if (!validate_start_bits(frame_bits)) {
-            ESP_LOGW(TAG, "Start bits validation failed: 0x%04X", frame_bits);
+            ESP_LOGW(TAG, "Start bits validation failed: 0x%04X", static_cast<unsigned>(frame_bits));
             char bin_str[17] = {0};
             for (int b = 13; b >= 0; --b) {
                 bin_str[13 - b] = (frame_bits & (1 << b)) ? '1' : '0';
@@ -88,7 +97,7 @@ private:
             return false;
         }
 
-        ESP_LOGI(TAG, "RC5 decoded successfully: 0x%04X", frame_bits);
+        ESP_LOGI(TAG, "RC5 decoded successfully: 0x%04X", static_cast<unsigned>(frame_bits));
         return fill_result(frame_bits, result);
     }
 
@@ -101,13 +110,17 @@ private:
         // 打印前3个符号用于调试
         if (symbol_num > 0) {
             ESP_LOGD(TAG, "First symbols: [0]d0=%u d1=%u l0=%u l1=%u",
-                     symbols[0].duration0, symbols[0].duration1,
-                     symbols[0].level0, symbols[0].level1);
+                     static_cast<unsigned>(symbols[0].duration0),
+                     static_cast<unsigned>(symbols[0].duration1),
+                     static_cast<unsigned>(symbols[0].level0),
+                     static_cast<unsigned>(symbols[0].level1));
         }
         if (symbol_num > 1) {
             ESP_LOGD(TAG, "               [1]d0=%u d1=%u l0=%u l1=%u",
-                     symbols[1].duration0, symbols[1].duration1,
-                     symbols[1].level0, symbols[1].level1);
+                     static_cast<unsigned>(symbols[1].duration0),
+                     static_cast<unsigned>(symbols[1].duration1),
+                     static_cast<unsigned>(symbols[1].level0),
+                     static_cast<unsigned>(symbols[1].level1));
         }
         
         // RC5需要至少7个符号（最紧凑的情况：7个全位周期=14位）
@@ -130,27 +143,36 @@ private:
             uint32_t d0 = sym.duration0;
             uint32_t d1 = sym.duration1;
             
-            ESP_LOGI(TAG, "  [%zu] d0=%u d1=%u l0=%u l1=%u (bits=%zu c=%u)", 
-                     i, d0, d1, sym.level0, sym.level1, bit_count, c ? 1 : 0);
+            ESP_LOGI(TAG, "  [%zu] d0=%u d1=%u l0=%u l1=%u (bits=%zu c=%u)",
+                     i,
+                     static_cast<unsigned>(d0),
+                     static_cast<unsigned>(d1),
+                     static_cast<unsigned>(sym.level0),
+                     static_cast<unsigned>(sym.level1),
+                     bit_count,
+                     static_cast<unsigned>(c ? 1 : 0));
             
             if (rc5_bit_match(d0, RC5_HALF_BIT_US)) {
                 // d0是半位：输出状态c（参考代码的核心逻辑）
                 uint32_t old_bits = frame_bits;
                 frame_bits = (frame_bits << 1) | (c ? 1U : 0U);
                 bit_count++;
-                ESP_LOGI(TAG, "    half: output c=%u, bits=0x%X->0x%X", c ? 1 : 0, old_bits, frame_bits);
+                ESP_LOGI(TAG, "    half: output c=%u, bits=0x%X->0x%X",
+                         static_cast<unsigned>(c ? 1 : 0),
+                         static_cast<unsigned>(old_bits),
+                         static_cast<unsigned>(frame_bits));
                 
                 // 根据d1更新c（参考代码：c = rc5_bit(d1, RC5_High) ? !c : c）
                 if (d1 == 0) {
                     // 结束
                 } else if (rc5_bit_match(d1, RC5_FULL_BIT_US)) {
                     c = !c;  // d1是全位，状态翻转
-                    ESP_LOGI(TAG, "      d1=full, flip c->%u", c ? 1 : 0);
+                    ESP_LOGI(TAG, "      d1=full, flip c->%u", static_cast<unsigned>(c ? 1 : 0));
                 } else if (rc5_bit_match(d1, RC5_HALF_BIT_US)) {
                     // d1是半位，c不变
-                    ESP_LOGI(TAG, "      d1=half, keep c=%u", c ? 1 : 0);
+                    ESP_LOGI(TAG, "      d1=half, keep c=%u", static_cast<unsigned>(c ? 1 : 0));
                 } else {
-                    ESP_LOGW(TAG, "RC5 d1=%u invalid", d1);
+                    ESP_LOGW(TAG, "RC5 d1=%u invalid", static_cast<unsigned>(d1));
                     return false;
                 }
             } else if (rc5_bit_match(d0, RC5_FULL_BIT_US)) {
@@ -163,24 +185,29 @@ private:
                 uint32_t two_bits = ((original_level0 << 1) | !original_level0);
                 frame_bits = (frame_bits << 2) | two_bits;
                 bit_count += 2;
-                ESP_LOGI(TAG, "    full: rx_l0=%u→orig_l0=%u, output 0b%u%u, bits=0x%X->0x%X",
-                         sym.level0, original_level0, (two_bits >> 1) & 1, two_bits & 1, old_bits, frame_bits);
+                ESP_LOGI(TAG, "    full: rx_l0=%u->orig_l0=%u, output 0b%u%u, bits=0x%X->0x%X",
+                         static_cast<unsigned>(sym.level0),
+                         static_cast<unsigned>(original_level0),
+                         static_cast<unsigned>((two_bits >> 1) & 1),
+                         static_cast<unsigned>(two_bits & 1),
+                         static_cast<unsigned>(old_bits),
+                         static_cast<unsigned>(frame_bits));
                 
                 // 根据d1更新c（参考代码：c = rc5_bit(d1, proto[RC5].one_low) ? !c : c）
                 if (d1 == 0) {
                     // 结束
                 } else if (rc5_bit_match(d1, RC5_HALF_BIT_US)) {
                     c = !c;  // d1是半位，状态翻转
-                    ESP_LOGI(TAG, "      d1=half, flip c->%u", c ? 1 : 0);
+                    ESP_LOGI(TAG, "      d1=half, flip c->%u", static_cast<unsigned>(c ? 1 : 0));
                 } else if (rc5_bit_match(d1, RC5_FULL_BIT_US)) {
                     // d1是全位，c不变（注意：这里与半位情况相反）
-                    ESP_LOGI(TAG, "      d1=full, keep c=%u", c ? 1 : 0);
+                    ESP_LOGI(TAG, "      d1=full, keep c=%u", static_cast<unsigned>(c ? 1 : 0));
                 } else {
-                    ESP_LOGW(TAG, "RC5 d1=%u invalid", d1);
+                    ESP_LOGW(TAG, "RC5 d1=%u invalid", static_cast<unsigned>(d1));
                     return false;
                 }
             } else {
-                ESP_LOGW(TAG, "RC5 d0=%u invalid", d0);
+                ESP_LOGW(TAG, "RC5 d0=%u invalid", static_cast<unsigned>(d0));
                 return false;
             }
         }
@@ -191,10 +218,12 @@ private:
             return false;
         }
 
-        ESP_LOGI(TAG, "RC5 baseband decoded: frame_bits=0x%04X (bit_count=%zu)", frame_bits, bit_count);
+        ESP_LOGI(TAG, "RC5 baseband decoded: frame_bits=0x%04X (bit_count=%zu)",
+                 static_cast<unsigned>(frame_bits), bit_count);
 
         if (!validate_start_bits(frame_bits)) {
-            ESP_LOGW(TAG, "RC5 start bits validation failed: 0x%04X (expect MSB 2 bits = 11)", frame_bits);
+            ESP_LOGW(TAG, "RC5 start bits validation failed: 0x%04X (expect MSB 2 bits = 11)",
+                     static_cast<unsigned>(frame_bits));
             // 打印二进制表示用于调试
             char bin_str[17] = {0};
             for (int b = 13; b >= 0; --b) {

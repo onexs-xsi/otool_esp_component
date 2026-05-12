@@ -243,7 +243,9 @@ esp_err_t audio_tools::es8311_init(audio_channels_t channels, es8311_path_mode_t
     incr_i2s_user();
 
     ESP_LOGI(TAG, "ES8311 initialized successfully (%s, %u Hz, %u bits)",
-             mode_desc, fs.sample_rate, fs.bits_per_sample);
+             mode_desc,
+             static_cast<unsigned>(fs.sample_rate),
+             static_cast<unsigned>(fs.bits_per_sample));
     return ESP_OK;
 }
 

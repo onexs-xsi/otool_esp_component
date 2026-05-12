@@ -238,12 +238,6 @@ esp_err_t sd_tools::mount()
 
     ESP_LOGI(TAG, "Mounting filesystem to %s", mount_point.c_str());
 
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = format_if_mount_failed,
-        .max_files = max_files,
-        .allocation_unit_size = allocation_unit_size
-    };
-
     esp_err_t ret;
     if (current_mode == SD_MODE_MMC_1BIT || current_mode == SD_MODE_MMC_4BIT) {
         ret = init_mmc_mode();
@@ -320,11 +314,10 @@ esp_err_t sd_tools::init_mmc_mode()
 
     ESP_LOGI(TAG, "Mounting filesystem (MMC %d-bit mode)", slot_config.width);
 
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = format_if_mount_failed,
-        .max_files = max_files,
-        .allocation_unit_size = allocation_unit_size
-    };
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {};
+    mount_config.format_if_mount_failed = format_if_mount_failed;
+    mount_config.max_files = max_files;
+    mount_config.allocation_unit_size = allocation_unit_size;
 
     return esp_vfs_fat_sdmmc_mount(mount_point.c_str(), &host, &slot_config, &mount_config, &card);
 }
@@ -348,14 +341,13 @@ esp_err_t sd_tools::init_spi_mode()
         ESP_LOGW(TAG, "SPI mode: limiting frequency from %lu kHz to 20000 kHz for stability", max_freq_khz);
     }
 
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num = spi_mosi_pin,
-        .miso_io_num = spi_miso_pin,
-        .sclk_io_num = spi_clk_pin,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = (int)spi_max_transfer_sz,
-    };
+    spi_bus_config_t bus_cfg = {};
+    bus_cfg.mosi_io_num = spi_mosi_pin;
+    bus_cfg.miso_io_num = spi_miso_pin;
+    bus_cfg.sclk_io_num = spi_clk_pin;
+    bus_cfg.quadwp_io_num = -1;
+    bus_cfg.quadhd_io_num = -1;
+    bus_cfg.max_transfer_sz = (int)spi_max_transfer_sz;
     
     esp_err_t ret = spi_bus_initialize(spi_host, &bus_cfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
@@ -369,11 +361,10 @@ esp_err_t sd_tools::init_spi_mode()
 
     ESP_LOGI(TAG, "Mounting filesystem (SPI mode)");
 
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = format_if_mount_failed,
-        .max_files = max_files,
-        .allocation_unit_size = allocation_unit_size
-    };
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {};
+    mount_config.format_if_mount_failed = format_if_mount_failed;
+    mount_config.max_files = max_files;
+    mount_config.allocation_unit_size = allocation_unit_size;
 
     return esp_vfs_fat_sdspi_mount(mount_point.c_str(), &host, &slot_config, &mount_config, &card);
 }
@@ -686,7 +677,9 @@ esp_err_t sd_tools::read_performance_test(const char* test_filepath, size_t chun
         uint64_t end_time = esp_timer_get_time();
         uint64_t total_time_ms = (end_time - start_time) / 1000;
         
-        ESP_LOGI(TAG, "%u MB read in %llu ms", file_size_mb, total_time_ms);
+        ESP_LOGI(TAG, "%u MB read in %llu ms",
+                 static_cast<unsigned>(file_size_mb),
+                 static_cast<unsigned long long>(total_time_ms));
         double seconds = total_time_ms / 1000.0;
         double speed_mb_s = file_size_mb / seconds;
         ESP_LOGI(TAG, "Read speed: %.2f MB/s", speed_mb_s);

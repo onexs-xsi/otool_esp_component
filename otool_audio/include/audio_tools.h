@@ -10,6 +10,7 @@
 //es8311 and es7210 include
 #include "driver/i2s_std.h"
 #include "driver/i2s_tdm.h"
+#include "esp_idf_version.h"
 #include "soc/soc_caps.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
@@ -25,6 +26,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+typedef int i2s_port_t;
+#endif
 
 // ESP-SR AEC support
 #include "esp_afe_aec.h"

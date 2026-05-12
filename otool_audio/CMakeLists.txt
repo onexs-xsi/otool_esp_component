@@ -33,6 +33,8 @@ list(APPEND TOOLBOX_INCLUDE_DIRS
 
 list(APPEND TOOLBOX_REQUIRES
     esp_codec_dev
+    esp_driver_i2s
+    esp_ringbuf
     esp-sr
     esp-dsp
 )

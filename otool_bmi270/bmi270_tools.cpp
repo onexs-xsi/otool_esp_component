@@ -644,11 +644,11 @@ esp_err_t bmi270_tools::configure_any_motion(const motion_config_t &config)
     ESP_LOGI(TAG, "Configuring any-motion detection with duration=%u, threshold=%u", config.duration, config.threshold);
 
     // 创建传感器配置结构
-    struct bmi2_sens_config sens_config = {0};
+    struct bmi2_sens_config sens_config = {};
     sens_config.type = BMI2_ANY_MOTION;
 
     // 创建中断引脚配置结构
-    struct bmi2_int_pin_config pin_config = {0};
+    struct bmi2_int_pin_config pin_config = {};
 
     int8_t rslt = BMI2_OK;
 
@@ -1804,7 +1804,7 @@ int bmi270_tools::read_magnetometer_data(mag_data_t* mag_data) {
     }
 
     int8_t rslt = BMI2_OK;
-    struct bmi2_sens_data sensor_data = {0};
+    struct bmi2_sens_data sensor_data = {};
     
     // 读取辅助传感器数据
     rslt = bmi2_get_sensor_data(&sensor_data, &_bmi270_dev);

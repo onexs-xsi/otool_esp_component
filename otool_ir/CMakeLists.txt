@@ -30,3 +30,7 @@ list(APPEND TOOLBOX_INCLUDE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/format/nec"
     "${CMAKE_CURRENT_LIST_DIR}/format/rc5"
 )
+
+list(APPEND TOOLBOX_REQUIRES
+    esp_driver_rmt
+)

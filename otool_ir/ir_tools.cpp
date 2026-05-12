@@ -313,7 +313,9 @@ esp_err_t ir_tools::send(const ir_send_request_t &request) {
         };
         esp_err_t ret = rmt_apply_carrier(tx_channel_, &carrier_cfg);
         if (ret != ESP_OK) {
-            ESP_LOGW(IR_TAG, "Failed to apply %ukHz carrier: %s", carrier_freq/1000, esp_err_to_name(ret));
+            ESP_LOGW(IR_TAG, "Failed to apply %ukHz carrier: %s",
+                     static_cast<unsigned>(carrier_freq / 1000),
+                     esp_err_to_name(ret));
         }
     }
     
@@ -322,24 +324,19 @@ esp_err_t ir_tools::send(const ir_send_request_t &request) {
 
 esp_err_t ir_tools::init_tx_channel() {
     ESP_LOGI(IR_TAG, "create RMT TX channel gpio=%d res=%u", static_cast<int>(tx_gpio_), static_cast<unsigned>(resolution_hz_));
-    rmt_tx_channel_config_t tx_channel_cfg = {
-        .gpio_num = tx_gpio_,
-        .clk_src = RMT_CLK_SRC_DEFAULT,
-        .resolution_hz = resolution_hz_,
-        .mem_block_symbols = 64,
-        .trans_queue_depth = 2,
-        .flags = {
-            .invert_out = true,
-        }
-    };
+    rmt_tx_channel_config_t tx_channel_cfg = {};
+    tx_channel_cfg.gpio_num          = tx_gpio_;
+    tx_channel_cfg.clk_src           = RMT_CLK_SRC_DEFAULT;
+    tx_channel_cfg.resolution_hz     = resolution_hz_;
+    tx_channel_cfg.mem_block_symbols = 64;
+    tx_channel_cfg.trans_queue_depth = 2;
+    tx_channel_cfg.flags.invert_out  = true;
 
     ESP_RETURN_ON_ERROR(rmt_new_tx_channel(&tx_channel_cfg, &tx_channel_), IR_TAG, "new tx channel failed");
 
-    rmt_carrier_config_t carrier_cfg = {
-        .frequency_hz = 38000,
-        .duty_cycle = 0.5f,
-        .flags = {}
-    };
+    rmt_carrier_config_t carrier_cfg = {};
+    carrier_cfg.frequency_hz = 38000;
+    carrier_cfg.duty_cycle   = 0.5f;
     esp_err_t ret = rmt_apply_carrier(tx_channel_, &carrier_cfg);
     if (ret != ESP_OK) {
         rmt_del_channel(tx_channel_);
@@ -364,15 +361,14 @@ esp_err_t ir_tools::init_rx_channel() {
     size_t subscribed_count = ir_decoder_get_subscribed_count(decoder_ctx_);
     // Each ESP32-P4 RMT block stores 64 symbols; cap total blocks to avoid exhausting group slots
     uint32_t rx_mem_symbols = (subscribed_count <= 1) ? 128 : 512;
-    rmt_rx_channel_config_t rx_channel_cfg = {
-        .gpio_num = rx_gpio_,
-        .clk_src = RMT_CLK_SRC_DEFAULT,
-        .resolution_hz = resolution_hz_,
-        .mem_block_symbols = rx_mem_symbols,
-    };
+    rmt_rx_channel_config_t rx_channel_cfg = {};
+    rx_channel_cfg.gpio_num          = rx_gpio_;
+    rx_channel_cfg.clk_src           = RMT_CLK_SRC_DEFAULT;
+    rx_channel_cfg.resolution_hz     = resolution_hz_;
+    rx_channel_cfg.mem_block_symbols = rx_mem_symbols;
 
     ESP_RETURN_ON_ERROR(rmt_new_rx_channel(&rx_channel_cfg, &rx_channel_), IR_TAG,
-                        "new rx channel failed (mem_symbols=%u)", rx_mem_symbols);
+                        "new rx channel failed (mem_symbols=%u)", static_cast<unsigned>(rx_mem_symbols));
     
     // 根据订阅的协议数量配置载波解调
     configure_rx_carrier_for_channel();
@@ -433,14 +429,13 @@ esp_err_t ir_tools::configure_rx_carrier_for_channel() {
                 carrier_freq = 38000;
             }
             
-            rmt_carrier_config_t carrier_cfg = {
-                .frequency_hz = carrier_freq,
-                .duty_cycle = 0.33f,
-                .flags = {
-                    .polarity_active_low = false,
-                }
-            };
-            ESP_LOGI(IR_TAG, "RX carrier enabled: %ukHz for %s", carrier_freq / 1000, ir_format_name(format));
+            rmt_carrier_config_t carrier_cfg = {};
+            carrier_cfg.frequency_hz = carrier_freq;
+            carrier_cfg.duty_cycle   = 0.33f;
+            carrier_cfg.flags.polarity_active_low = false;
+            ESP_LOGI(IR_TAG, "RX carrier enabled: %ukHz for %s",
+                     static_cast<unsigned>(carrier_freq / 1000),
+                     ir_format_name(format));
             return rmt_apply_carrier(rx_channel_, &carrier_cfg);
         }
     } else {
@@ -504,10 +499,9 @@ void ir_tools::rx_task(void *pvParameters) {
     // 多协议(基带模式): 使用3000ns尽量过滤单个载波周期(36kHz≈27.8us, 但硬件限制无法完全过滤)
     uint32_t min_ns = (subscribed_count <= 1) ? 1250 : 3000;
     
-    rmt_receive_config_t receive_config = {
-        .signal_range_min_ns = min_ns,
-        .signal_range_max_ns = 30000000, // allow RC5 (~25ms) to be captured fully
-    };
+    rmt_receive_config_t receive_config = {};
+    receive_config.signal_range_min_ns = min_ns;
+    receive_config.signal_range_max_ns = 30000000; // allow RC5 (~25ms) to be captured fully
     
     ESP_LOGI(IR_TAG, "RX task started with min_ns=%u (subscribed=%zu, buffer=%zu symbols)", 
              static_cast<unsigned>(min_ns), subscribed_count, symbol_buffer_len);

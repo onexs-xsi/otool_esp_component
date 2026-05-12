@@ -173,7 +173,7 @@ channel_split_result_t audio_recorder::split_recorded_channels(const uint8_t* re
     }
 
     if (result.bytes_per_sample == 0) {
-        ESP_LOGE(TAG, "Invalid bits_per_sample: %u", fs.bits_per_sample);
+        ESP_LOGE(TAG, "Invalid bits_per_sample: %u", static_cast<unsigned>(fs.bits_per_sample));
         result.status = ESP_ERR_INVALID_ARG;
         return result;
     }
@@ -187,7 +187,8 @@ channel_split_result_t audio_recorder::split_recorded_channels(const uint8_t* re
     }
 
     if (mic_count == 0) {
-        ESP_LOGE(TAG, "No microphone channels enabled for splitting (mask=0x%02X)", mic_channels);
+        ESP_LOGE(TAG, "No microphone channels enabled for splitting (mask=0x%02X)",
+                 static_cast<unsigned>(mic_channels));
         result.status = ESP_ERR_INVALID_ARG;
         return result;
     }
@@ -215,7 +216,7 @@ channel_split_result_t audio_recorder::split_recorded_channels(const uint8_t* re
         const size_t frame_bytes = result.bytes_per_sample * channel_count;
         if (frame_bytes == 0) {
             ESP_LOGE(TAG, "Invalid STD frame size calculation (slot bytes=%zu, channels=%u)",
-                     result.bytes_per_sample, fs.channel);
+                     result.bytes_per_sample, static_cast<unsigned>(fs.channel));
             result.status = ESP_ERR_INVALID_STATE;
             return result;
         }
@@ -235,7 +236,7 @@ channel_split_result_t audio_recorder::split_recorded_channels(const uint8_t* re
             result.mic_buffers[i] = static_cast<int16_t*>(malloc(samples_per_channel * sizeof(int16_t)));
             if (!result.mic_buffers[i]) {
                 ESP_LOGE(TAG, "Failed to allocate channel buffer for MIC%u (%zu samples)",
-                         i + 1, samples_per_channel);
+                         static_cast<unsigned>(i + 1), samples_per_channel);
                 for (int j = 0; j < 4; ++j) {
                     if (result.mic_buffers[j]) {
                         free(result.mic_buffers[j]);
@@ -299,7 +300,8 @@ channel_split_result_t audio_recorder::split_recorded_channels(const uint8_t* re
         const size_t frame_bytes = result.bytes_per_sample * channel_count;
 
         if (channel_count > 2) {
-            ESP_LOGW(TAG, "STD mode detected with %u channels; using first two for MIC mapping", fs.channel);
+            ESP_LOGW(TAG, "STD mode detected with %u channels; using first two for MIC mapping",
+                     static_cast<unsigned>(fs.channel));
         }
 
         if (channel_count == 1 && mic_count > 1) {
@@ -490,7 +492,9 @@ esp_err_t audio_recorder::record_to_file(const char* filepath, uint32_t record_d
     }
 
     if (filepath == nullptr || filepath[0] == '\0' || record_duration_seconds == 0) {
-        ESP_LOGE(TAG, "Invalid arguments: filepath=%p, duration=%lu", filepath, record_duration_seconds);
+        ESP_LOGE(TAG, "Invalid arguments: filepath=%p, duration=%lu",
+                 filepath,
+                 static_cast<unsigned long>(record_duration_seconds));
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -501,7 +505,10 @@ esp_err_t audio_recorder::record_to_file(const char* filepath, uint32_t record_d
     uint32_t bytes_per_sample = (bits * channels) / 8;
 
     if (bytes_per_sample == 0 || sample_rate_hz == 0) {
-        ESP_LOGE(TAG, "Invalid audio format: sr=%u, bits=%u, channels=%u", sample_rate_hz, bits, channels);
+        ESP_LOGE(TAG, "Invalid audio format: sr=%u, bits=%u, channels=%u",
+                 static_cast<unsigned>(sample_rate_hz),
+                 static_cast<unsigned>(bits),
+                 static_cast<unsigned>(channels));
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -551,7 +558,11 @@ esp_err_t audio_recorder::record_to_file(const char* filepath, uint32_t record_d
     }
 
     ESP_LOGI(TAG, "Recording %u Hz, %u-bit, %u-ch audio for %lu s -> %zu bytes into %s",
-             sample_rate_hz, bits, channels, record_duration_seconds, total_bytes, filepath);
+             static_cast<unsigned>(sample_rate_hz),
+             static_cast<unsigned>(bits),
+             static_cast<unsigned>(channels),
+             static_cast<unsigned long>(record_duration_seconds),
+             total_bytes, filepath);
 
     size_t bytes_written = 0;
     esp_err_t ret = ESP_OK;
@@ -582,7 +593,7 @@ esp_err_t audio_recorder::record_to_file(const char* filepath, uint32_t record_d
 
     TickType_t elapsed_ticks = xTaskGetTickCount() - start_ticks;
     uint32_t elapsed_ms = pdTICKS_TO_MS(elapsed_ticks);
-    ESP_LOGI(TAG, "Recording loop elapsed %u ms", elapsed_ms);
+    ESP_LOGI(TAG, "Recording loop elapsed %u ms", static_cast<unsigned>(elapsed_ms));
 
     if (ret != ESP_OK) {
         return ret;
@@ -658,13 +669,16 @@ esp_err_t audio_recorder::record_all_channel_to_files(uint32_t record_duration_s
 
     if (fs.sample_rate == 0 || fs.bits_per_sample == 0 || fs.channel == 0) {
         ESP_LOGE(TAG, "Invalid audio format: sr=%u, bits=%u, ch=%u",
-                 fs.sample_rate, fs.bits_per_sample, fs.channel);
+                 static_cast<unsigned>(fs.sample_rate),
+                 static_cast<unsigned>(fs.bits_per_sample),
+                 static_cast<unsigned>(fs.channel));
         return ESP_ERR_INVALID_STATE;
     }
 
     const size_t bytes_per_sample = (fs.bits_per_sample >> 3);
     if (bytes_per_sample == 0) {
-        ESP_LOGE(TAG, "bits_per_sample %u results in zero byte samples", fs.bits_per_sample);
+        ESP_LOGE(TAG, "bits_per_sample %u results in zero byte samples",
+                 static_cast<unsigned>(fs.bits_per_sample));
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -677,9 +691,11 @@ esp_err_t audio_recorder::record_all_channel_to_files(uint32_t record_duration_s
 
     size_t buffer_size = static_cast<size_t>(buffer_size_64);
 
-    ESP_LOGI(TAG, "=== Record All Channels (%lu s) ===", record_duration_seconds);
+    ESP_LOGI(TAG, "=== Record All Channels (%lu s) ===", static_cast<unsigned long>(record_duration_seconds));
     ESP_LOGI(TAG, "Format: %u Hz, %u bits, %u channels (%s)",
-             fs.sample_rate, fs.bits_per_sample, fs.channel,
+             static_cast<unsigned>(fs.sample_rate),
+             static_cast<unsigned>(fs.bits_per_sample),
+             static_cast<unsigned>(fs.channel),
              is_tdm_mode ? "TDM" : "Standard");
     ESP_LOGI(TAG, "Buffer size: %zu bytes (%.2f KB)", buffer_size, buffer_size / 1024.0f);
 
@@ -767,7 +783,7 @@ esp_err_t audio_recorder::record_all_channel_to_files(uint32_t record_duration_s
         }
 
         ESP_LOGI(TAG, "  MIC%u -> samples:%zu rms:%.1f dB peak:[%d,%d] zero:%.1f%% clip:%.2f%%",
-                 mic_index + 1,
+                 static_cast<unsigned>(mic_index + 1),
                  q.sample_count,
                  q.rms_db,
                  q.min_value,
@@ -904,7 +920,7 @@ esp_err_t audio_recorder::record_all_channel_to_files(uint32_t record_duration_s
         ++files_written;
         float channel_duration = static_cast<float>(quality.sample_count) / static_cast<float>(fs.sample_rate);
         ESP_LOGI(TAG, "Saved MIC%u to %s (%.2f s, rms %.1f dB)",
-                 mic_index + 1, file_path.c_str(), channel_duration, quality.rms_db);
+                 static_cast<unsigned>(mic_index + 1), file_path.c_str(), channel_duration, quality.rms_db);
     }
 
     free_channel_split_result(split_result);
@@ -948,7 +964,7 @@ esp_err_t audio_recorder::record_test(uint32_t record_duration_ms)
     }
 
     ESP_LOGI(TAG, "Starting %lu ms record test using %s...",
-             record_duration_ms,
+             static_cast<unsigned long>(record_duration_ms),
              using_es8311_adc ? "ES8311 ADC" : "ES7210 ADC");
 
     // 分配录音缓冲区（动态参数）
@@ -1002,7 +1018,8 @@ esp_err_t audio_recorder::record_test(uint32_t record_duration_ms)
         
         // 检查是否超时
         if ((xTaskGetTickCount() - start_time) > timeout_ticks) {
-            ESP_LOGW(TAG, "Record timeout reached (%lu ms), stop early", record_duration_ms);
+            ESP_LOGW(TAG, "Record timeout reached (%lu ms), stop early",
+                     static_cast<unsigned long>(record_duration_ms));
             break;
         }
     }
@@ -1011,7 +1028,9 @@ esp_err_t audio_recorder::record_test(uint32_t record_duration_ms)
     uint32_t actual_duration = pdTICKS_TO_MS(end_time - start_time);
     
     ESP_LOGI(TAG, "Record completed successfully");
-    ESP_LOGI(TAG, "Requested duration: %lu ms, Actual duration: %lu ms", record_duration_ms, actual_duration);
+    ESP_LOGI(TAG, "Requested duration: %lu ms, Actual duration: %lu ms",
+             static_cast<unsigned long>(record_duration_ms),
+             static_cast<unsigned long>(actual_duration));
     ESP_LOGI(TAG, "Expected bytes: %zu, Actual bytes read: %zu (%.1f%%)", buffer_size, bytes_read, (buffer_size? (bytes_read * 100.0 / buffer_size):0.0));
     
     // 简单的音频数据分析
@@ -1074,7 +1093,7 @@ esp_err_t audio_recorder::record_and_play_test(uint32_t record_duration_seconds)
     }
 
     ESP_LOGI(TAG, "=== Record and Play Test (Single Shot) ===");
-    ESP_LOGI(TAG, "Duration: %lu seconds", record_duration_seconds);
+    ESP_LOGI(TAG, "Duration: %lu seconds", static_cast<unsigned long>(record_duration_seconds));
     
     // 获取当前音频格式信息（使用录音设备的声道配置）
     esp_codec_dev_sample_info_t fs = {};
@@ -1082,8 +1101,10 @@ esp_err_t audio_recorder::record_and_play_test(uint32_t record_duration_seconds)
     fs.channel = (parent_->rx_channels == AUDIO_CHANNELS_MONO) ? 1 : 2;
     fs.bits_per_sample = (uint32_t)parent_->bits_per_sample;
     
-    ESP_LOGI(TAG, "Audio format: %lu Hz, %u channels, %u bits",
-             fs.sample_rate, fs.channel, fs.bits_per_sample);
+    ESP_LOGI(TAG, "Audio format: %u Hz, %u channels, %u bits",
+             static_cast<unsigned>(fs.sample_rate),
+             static_cast<unsigned>(fs.channel),
+             static_cast<unsigned>(fs.bits_per_sample));
     
     // 计算缓冲区大小
     size_t bytes_per_sample = (fs.bits_per_sample >> 3);
@@ -1103,7 +1124,7 @@ esp_err_t audio_recorder::record_and_play_test(uint32_t record_duration_seconds)
     memset(record_buffer, 0, buffer_size);
     
     // ========== Phase 1: Recording ==========
-    ESP_LOGI(TAG, "Phase 1: Recording %lu seconds...", record_duration_seconds);
+    ESP_LOGI(TAG, "Phase 1: Recording %lu seconds...", static_cast<unsigned long>(record_duration_seconds));
     
     const size_t BLOCK_SIZE = 512;
     const TickType_t timeout_ticks = pdMS_TO_TICKS(record_duration_seconds * 1000 + 500);
@@ -1142,7 +1163,8 @@ esp_err_t audio_recorder::record_and_play_test(uint32_t record_duration_seconds)
     
     ESP_LOGI(TAG, "Recording completed!");
     ESP_LOGI(TAG, "Requested: %lu sec, Actual: %.2f sec",
-             record_duration_seconds, actual_duration_ms / 1000.0f);
+             static_cast<unsigned long>(record_duration_seconds),
+             actual_duration_ms / 1000.0f);
     ESP_LOGI(TAG, "Bytes read: %zu / %zu (%.1f%%)",
              bytes_read, buffer_size, (buffer_size > 0) ? (bytes_read * 100.0f / buffer_size) : 0.0f);
     
@@ -1217,7 +1239,7 @@ esp_err_t audio_recorder::record_and_play_test(uint32_t record_duration_seconds)
         for (uint32_t ch = 0; ch < fs.channel; ch++) {
             // 通道标识
             const char* ch_name = (ch == 0) ? "Microphone" : "Loopback";
-            ESP_LOGI(TAG, "=== CH%u (%s) Statistics ===", ch + 1, ch_name);
+            ESP_LOGI(TAG, "=== CH%u (%s) Statistics ===", static_cast<unsigned>(ch + 1), ch_name);
             
             // 统计变量
             int64_t sum_squares = 0;  // 用于计算RMS
@@ -1329,7 +1351,7 @@ esp_err_t audio_recorder::record_and_play_test_with_channel_select(uint32_t reco
     
     if (!is_single_channel) {
         ESP_LOGE(TAG, "target_mic_channel must be a single microphone (AUDIO_MIC_CHANNEL_1/2/3/4), got: 0x%02X", 
-                 target_mic_value);
+                 static_cast<unsigned>(target_mic_value));
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -1341,14 +1363,16 @@ esp_err_t audio_recorder::record_and_play_test_with_channel_select(uint32_t reco
         case AUDIO_MIC_CHANNEL_3: target_channel = 2; break;
         case AUDIO_MIC_CHANNEL_4: target_channel = 3; break;
         default:
-            ESP_LOGE(TAG, "Invalid target_mic_channel: 0x%02X", target_mic_value);
+            ESP_LOGE(TAG, "Invalid target_mic_channel: 0x%02X", static_cast<unsigned>(target_mic_value));
             return ESP_ERR_INVALID_ARG;
     }
 
     // 检查目标通道是否已启用
     if (!(parent_->mic_channels & target_mic_value)) {
         ESP_LOGE(TAG, "Target MIC%u (0x%02X) is not enabled in current config (0x%02X)", 
-                 target_channel + 1, target_mic_value, parent_->mic_channels);
+                 static_cast<unsigned>(target_channel + 1),
+                 static_cast<unsigned>(target_mic_value),
+                 static_cast<unsigned>(parent_->mic_channels));
         ESP_LOGE(TAG, "Please initialize ES7210 with the target microphone enabled");
         return ESP_ERR_INVALID_ARG;
     }
@@ -1366,9 +1390,13 @@ esp_err_t audio_recorder::record_and_play_test_with_channel_select(uint32_t reco
     
     ESP_LOGI(TAG, "=== Record and %s Test (Channel Select) ===", analysis_only ? "Analysis" : "Play");
     ESP_LOGI(TAG, "Duration: %lu seconds, Target: MIC%u (0x%02X)", 
-             record_duration_seconds, target_channel + 1, target_mic_value);
+             static_cast<unsigned long>(record_duration_seconds),
+             static_cast<unsigned>(target_channel + 1),
+             static_cast<unsigned>(target_mic_value));
     ESP_LOGI(TAG, "Mode: %s (%u mics enabled: 0x%02X), Analysis only: %s", 
-             is_tdm_mode ? "TDM" : "Standard I2S", mic_count, parent_->mic_channels,
+             is_tdm_mode ? "TDM" : "Standard I2S",
+             static_cast<unsigned>(mic_count),
+             static_cast<unsigned>(parent_->mic_channels),
              analysis_only ? "YES" : "NO");
     
     // 获取当前音频格式信息
@@ -1385,8 +1413,10 @@ esp_err_t audio_recorder::record_and_play_test_with_channel_select(uint32_t reco
     
     size_t bytes_per_sample = (fs.bits_per_sample >> 3);
     
-    ESP_LOGI(TAG, "Audio format: %lu Hz, %u channels, %u bits per sample",
-             fs.sample_rate, fs.channel, fs.bits_per_sample);
+    ESP_LOGI(TAG, "Audio format: %u Hz, %u channels, %u bits per sample",
+             static_cast<unsigned>(fs.sample_rate),
+             static_cast<unsigned>(fs.channel),
+             static_cast<unsigned>(fs.bits_per_sample));
     
     // 计算录音缓冲区大小
     size_t buffer_size = (size_t)fs.sample_rate * fs.channel * bytes_per_sample * record_duration_seconds;
@@ -1394,8 +1424,10 @@ esp_err_t audio_recorder::record_and_play_test_with_channel_select(uint32_t reco
     if (is_tdm_mode) {
         ESP_LOGI(TAG, "TDM buffer calculation:");
         ESP_LOGI(TAG, "  - Total buffer: %zu bytes (%.2f KB)", buffer_size, buffer_size / 1024.0f);
-        ESP_LOGI(TAG, "  - TDM slots: %u", fs.channel);
-        ESP_LOGI(TAG, "  - Active mics: %u (0x%02X)", mic_count, parent_->mic_channels);
+        ESP_LOGI(TAG, "  - TDM slots: %u", static_cast<unsigned>(fs.channel));
+        ESP_LOGI(TAG, "  - Active mics: %u (0x%02X)",
+                 static_cast<unsigned>(mic_count),
+                 static_cast<unsigned>(parent_->mic_channels));
         ESP_LOGI(TAG, "  - Data rate: %.2f KB/s", 
                  (float)(fs.sample_rate * fs.channel * bytes_per_sample) / 1024.0f);
     } else {
@@ -1478,7 +1510,8 @@ esp_err_t audio_recorder::record_and_play_test_with_channel_select(uint32_t reco
 
     int16_t* target_samples = split_result.mic_buffers[target_channel];
     if (!target_samples) {
-        ESP_LOGE(TAG, "Target MIC%u buffer unavailable after splitting", target_channel + 1);
+        ESP_LOGE(TAG, "Target MIC%u buffer unavailable after splitting",
+                 static_cast<unsigned>(target_channel + 1));
         free_channel_split_result(split_result);
         return ESP_ERR_INVALID_STATE;
     }
@@ -1492,9 +1525,11 @@ esp_err_t audio_recorder::record_and_play_test_with_channel_select(uint32_t reco
                                           : 0.0f;
 
     ESP_LOGI(TAG, "Extracted %zu samples from MIC%u (%.2f seconds)",
-             extracted_samples, target_channel + 1, target_duration_sec);
+             extracted_samples,
+             static_cast<unsigned>(target_channel + 1),
+             target_duration_sec);
 
-    ESP_LOGI(TAG, "=== MIC%u Audio Analysis Report ===", target_channel + 1);
+    ESP_LOGI(TAG, "=== MIC%u Audio Analysis Report ===", static_cast<unsigned>(target_channel + 1));
     ESP_LOGI(TAG, "  Total samples: %zu (%.2f seconds)", extracted_samples, target_duration_sec);
     ESP_LOGI(TAG, "  Average amplitude: %ld", static_cast<long>(target_quality.average_abs_amplitude));
     ESP_LOGI(TAG, "  Peak range: [%d, %d]", target_quality.min_value, target_quality.max_value);
@@ -1502,9 +1537,10 @@ esp_err_t audio_recorder::record_and_play_test_with_channel_select(uint32_t reco
     ESP_LOGI(TAG, "  Signal quality: %s", target_quality.average_abs_amplitude > 100 ? "GOOD" : "LOW");
 
     if (target_quality.average_abs_amplitude > 100) {
-        ESP_LOGI(TAG, "Valid audio signal detected from MIC%u", target_channel + 1);
+        ESP_LOGI(TAG, "Valid audio signal detected from MIC%u", static_cast<unsigned>(target_channel + 1));
     } else {
-        ESP_LOGW(TAG, "Low audio signal from MIC%u - check microphone connection/gain", target_channel + 1);
+        ESP_LOGW(TAG, "Low audio signal from MIC%u - check microphone connection/gain",
+                 static_cast<unsigned>(target_channel + 1));
     }
     ESP_LOGI(TAG, "====================================");
 
@@ -1517,7 +1553,7 @@ esp_err_t audio_recorder::record_and_play_test_with_channel_select(uint32_t reco
 
         const char* marker = (mic_index == target_channel) ? " (target)" : "";
         ESP_LOGI(TAG, "  MIC%u%s -> avg:%ld peak:[%d,%d] rms:%.1f dB signal:%s",
-                 mic_index + 1,
+                 static_cast<unsigned>(mic_index + 1),
                  marker,
                  static_cast<long>(mic_quality.average_abs_amplitude),
                  mic_quality.min_value,
@@ -1538,7 +1574,7 @@ esp_err_t audio_recorder::record_and_play_test_with_channel_select(uint32_t reco
     vTaskDelay(pdMS_TO_TICKS(500));
 
     // ========== Phase 3: Playback ==========
-    ESP_LOGI(TAG, "Phase 3: Playing extracted MIC%u audio...", target_channel + 1);
+    ESP_LOGI(TAG, "Phase 3: Playing extracted MIC%u audio...", static_cast<unsigned>(target_channel + 1));
 
     start_time = xTaskGetTickCount();
 
@@ -1635,23 +1671,24 @@ esp_err_t audio_recorder::record_and_playback_test(uint32_t record_duration_seco
 
             if (!found) {
                 ESP_LOGE(TAG, "Failed to auto-select TDM microphone channel (mask=0x%02X)",
-                         static_cast<uint8_t>(enabled_mics));
+                         static_cast<unsigned>(enabled_mics));
                 return ESP_ERR_INVALID_STATE;
             }
 
-            ESP_LOGI(TAG, "TDM auto-selected MIC%u for playback", selected_channel_index + 1);
+            ESP_LOGI(TAG, "TDM auto-selected MIC%u for playback",
+                     static_cast<unsigned>(selected_channel_index + 1));
         } else {
             if (!is_single_mic(effective_target)) {
                 ESP_LOGE(TAG, "TDM mode requires single mic selection, got 0x%02X",
-                         static_cast<uint8_t>(effective_target));
+                         static_cast<unsigned>(effective_target));
                 return ESP_ERR_INVALID_ARG;
             }
 
             uint8_t mask = static_cast<uint8_t>(effective_target);
             if (!(mask & static_cast<uint8_t>(enabled_mics))) {
                 ESP_LOGE(TAG, "Selected MIC (0x%02X) not enabled (mask=0x%02X)",
-                         mask,
-                         static_cast<uint8_t>(enabled_mics));
+                         static_cast<unsigned>(mask),
+                         static_cast<unsigned>(enabled_mics));
                 return ESP_ERR_INVALID_ARG;
             }
 
@@ -1670,13 +1707,13 @@ esp_err_t audio_recorder::record_and_playback_test(uint32_t record_duration_seco
                     break;
                 default:
                     ESP_LOGE(TAG, "Unsupported mic channel selection 0x%02X",
-                             static_cast<uint8_t>(effective_target));
+                             static_cast<unsigned>(effective_target));
                     return ESP_ERR_INVALID_ARG;
             }
         }
     } else if (target_mic_channel != AUDIO_MIC_NONE) {
         ESP_LOGW(TAG, "Standard I2S mode ignores target_mic_channel (0x%02X)",
-                 static_cast<uint8_t>(target_mic_channel));
+                 static_cast<unsigned>(target_mic_channel));
     }
 
     esp_codec_dev_sample_info_t fs = {};
@@ -1685,8 +1722,8 @@ esp_err_t audio_recorder::record_and_playback_test(uint32_t record_duration_seco
 
     if (fs.sample_rate == 0 || fs.bits_per_sample == 0) {
         ESP_LOGE(TAG, "Invalid audio format configuration (sr=%u, bits=%u)",
-                 fs.sample_rate,
-                 fs.bits_per_sample);
+                 static_cast<unsigned>(fs.sample_rate),
+                 static_cast<unsigned>(fs.bits_per_sample));
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1703,7 +1740,8 @@ esp_err_t audio_recorder::record_and_playback_test(uint32_t record_duration_seco
 
     const size_t bytes_per_sample = fs.bits_per_sample >> 3;
     if (bytes_per_sample == 0) {
-        ESP_LOGE(TAG, "bits_per_sample %u produces zero-sized samples", fs.bits_per_sample);
+        ESP_LOGE(TAG, "bits_per_sample %u produces zero-sized samples",
+                 static_cast<unsigned>(fs.bits_per_sample));
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1725,14 +1763,14 @@ esp_err_t audio_recorder::record_and_playback_test(uint32_t record_duration_seco
     }
 
     ESP_LOGI(TAG, "=== Record-playback test (%lu s, loop: %s, mode: %s) ===",
-             record_duration_seconds,
+             static_cast<unsigned long>(record_duration_seconds),
              loop_playback ? "YES" : "NO",
              is_tdm_mode ? "TDM" : "STD");
 
     if (is_tdm_mode) {
         ESP_LOGI(TAG, "Enabled MIC mask: 0x%02X, target MIC%u",
-                 static_cast<uint8_t>(enabled_mics),
-                 selected_channel_index + 1);
+                 static_cast<unsigned>(enabled_mics),
+                 static_cast<unsigned>(selected_channel_index + 1));
     }
 
     const size_t block_size = 512;
@@ -1743,7 +1781,7 @@ esp_err_t audio_recorder::record_and_playback_test(uint32_t record_duration_seco
 
         ESP_LOGI(TAG, "Cycle #%d: Recording %lu seconds... (buffer %zu bytes)",
                  cycle_index,
-                 record_duration_seconds,
+                 static_cast<unsigned long>(record_duration_seconds),
                  record_bytes);
 
         TickType_t start_tick = xTaskGetTickCount();
@@ -1809,16 +1847,16 @@ esp_err_t audio_recorder::record_and_playback_test(uint32_t record_duration_seco
 
             if (!target_quality.available || target_quality.sample_count == 0) {
                 ESP_LOGE(TAG, "Cycle #%d: Target MIC%u has no samples",
-                         cycle_index,
-                         selected_channel_index + 1);
+                          cycle_index,
+                          static_cast<unsigned>(selected_channel_index + 1));
                 free_channel_split_result(split_result);
                 return ESP_ERR_INVALID_STATE;
             }
 
             ESP_LOGI(TAG, "Cycle #%d: MIC%u stats -> samples:%zu rms:%.1f dB peak:[%d,%d]",
-                     cycle_index,
-                     selected_channel_index + 1,
-                     target_quality.sample_count,
+                      cycle_index,
+                      static_cast<unsigned>(selected_channel_index + 1),
+                      target_quality.sample_count,
                      target_quality.rms_db,
                      target_quality.min_value,
                      target_quality.max_value);

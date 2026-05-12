@@ -212,7 +212,10 @@ esp_err_t audio_tools::es7210_init(audio_channels_t channels, audio_mic_channel_
     fs.bits_per_sample = static_cast<uint32_t>(bits_per_sample);
     
     ESP_LOGI(TAG, "Opening ES7210 with sample rate %d Hz, %d channels, %d bits per sample (TDM=%s)",
-             fs.sample_rate, fs.channel, fs.bits_per_sample, es7210_use_tdm ? "YES" : "NO");
+             static_cast<int>(fs.sample_rate),
+             static_cast<int>(fs.channel),
+             static_cast<int>(fs.bits_per_sample),
+             es7210_use_tdm ? "YES" : "NO");
     
     ret = esp_codec_dev_open(record_dev, &fs);
     if (ret != ESP_OK) {

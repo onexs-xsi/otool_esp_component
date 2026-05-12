@@ -257,7 +257,9 @@ esp_err_t convert_channels(const float* input,
 		return ESP_OK;
 	}
 
-	ESP_LOGE(TAG, "Unsupported channel conversion: %u -> %u", input_channels, output_channels);
+	ESP_LOGE(TAG, "Unsupported channel conversion: %u -> %u",
+	         static_cast<unsigned>(input_channels),
+	         static_cast<unsigned>(output_channels));
 	return ESP_ERR_NOT_SUPPORTED;
 }
 
@@ -274,7 +276,7 @@ audio_data_type_t bits_to_audio_data_type(uint32_t bits)
 		case 16: return AUDIO_TYPE_INT16;
 		case 32: return AUDIO_TYPE_INT32;
 		default: 
-			ESP_LOGW(TAG, "Unsupported bit depth: %lu, defaulting to 16-bit", bits);
+			ESP_LOGW(TAG, "Unsupported bit depth: %u, defaulting to 16-bit", static_cast<unsigned>(bits));
 			return AUDIO_TYPE_INT16;
 	}
 }
@@ -303,8 +305,12 @@ esp_err_t remix_convert_pcm_to_format(const uint8_t* input_data,
 
 	if (!input_data || input_size == 0 || input_rate == 0 || target_rate == 0 || 
 	    input_channels == 0 || target_channels == 0) {
-		ESP_LOGE(TAG, "Invalid arguments: input=%p size=%zu rate_in=%lu rate_out=%lu ch_in=%lu ch_out=%lu",
-				 input_data, input_size, input_rate, target_rate, input_channels, target_channels);
+		ESP_LOGE(TAG, "Invalid arguments: input=%p size=%zu rate_in=%u rate_out=%u ch_in=%u ch_out=%u",
+				 input_data, input_size,
+				 static_cast<unsigned>(input_rate),
+				 static_cast<unsigned>(target_rate),
+				 static_cast<unsigned>(input_channels),
+				 static_cast<unsigned>(target_channels));
 		return ESP_ERR_INVALID_ARG;
 	}
 
@@ -314,14 +320,16 @@ esp_err_t remix_convert_pcm_to_format(const uint8_t* input_data,
 	}
 
 	if (input_channels > 2 || target_channels > 2) {
-		ESP_LOGE(TAG, "Unsupported channel count: in=%lu, out=%lu (max=2)", input_channels, target_channels);
+		ESP_LOGE(TAG, "Unsupported channel count: in=%u, out=%u (max=2)",
+		         static_cast<unsigned>(input_channels),
+		         static_cast<unsigned>(target_channels));
 		return ESP_ERR_NOT_SUPPORTED;
 	}
 
 	const size_t input_sample_size = get_sample_size(input_type);
 	if (input_sample_size == 0 || (input_size % (input_sample_size * input_channels)) != 0) {
-		ESP_LOGE(TAG, "Input size mismatch: bytes=%zu, type=%d, channels=%lu", 
-		         input_size, input_type, input_channels);
+		ESP_LOGE(TAG, "Input size mismatch: bytes=%zu, type=%d, channels=%u",
+		         input_size, input_type, static_cast<unsigned>(input_channels));
 		return ESP_ERR_INVALID_SIZE;
 	}
 
@@ -353,10 +361,19 @@ esp_err_t remix_convert_pcm_to_format(const uint8_t* input_data,
 		}
 	};
 
-	ESP_LOGI(TAG, "Converting: %lux%lu@%luHz %s -> %lux%lu@%luHz %s",
-	         samples_per_channel, input_channels, input_rate, get_type_name(input_type),
-	         need_resample ? ((samples_per_channel * target_rate + input_rate/2) / input_rate) : samples_per_channel,
-	         target_channels, target_rate, get_type_name(target_type));
+	const size_t output_samples_per_channel =
+	    need_resample ? static_cast<size_t>((samples_per_channel * target_rate + input_rate/2) / input_rate)
+	                  : samples_per_channel;
+
+	ESP_LOGI(TAG, "Converting: %zux%u@%uHz %s -> %zux%u@%uHz %s",
+	         samples_per_channel,
+	         static_cast<unsigned>(input_channels),
+	         static_cast<unsigned>(input_rate),
+	         get_type_name(input_type),
+	         output_samples_per_channel,
+	         static_cast<unsigned>(target_channels),
+	         static_cast<unsigned>(target_rate),
+	         get_type_name(target_type));
 
 	// 步骤1: 转换为float中间格式
 	float* float_buffer = static_cast<float*>(calloc_spiram(total_input_samples, sizeof(float)));

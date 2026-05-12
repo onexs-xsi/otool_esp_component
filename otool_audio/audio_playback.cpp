@@ -316,8 +316,13 @@ esp_err_t audio_playback::play_audio_file_impl(audio_file_type_t audio_type, boo
 
     if (using_converted) {
         ESP_LOGI(TAG, "Audio format converted: %u Hz, %u bit, %u ch -> %u Hz, %u bit, %u ch (%zu -> %zu bytes)",
-                 file_sample_rate_hz, static_cast<uint32_t>(file_bits), static_cast<uint32_t>(file_channels),
-                 system_sample_rate_hz, system_bits, system_channels, pcm_len, playback_size);
+                 static_cast<unsigned>(file_sample_rate_hz),
+                 static_cast<unsigned>(file_bits),
+                 static_cast<unsigned>(file_channels),
+                 static_cast<unsigned>(system_sample_rate_hz),
+                 static_cast<unsigned>(system_bits),
+                 static_cast<unsigned>(system_channels),
+                 pcm_len, playback_size);
     } else {
         ESP_LOGI(TAG, "Audio format matches system configuration");
     }
@@ -401,7 +406,7 @@ esp_err_t audio_playback::play_audio_buffer_impl(const uint8_t* buffer, size_t b
     }
 
     if (buffer_sample_rate_hz == 0) {
-        ESP_LOGE(TAG, "Invalid sample rate: %u Hz", buffer_sample_rate_hz);
+        ESP_LOGE(TAG, "Invalid sample rate: %u Hz", static_cast<unsigned>(buffer_sample_rate_hz));
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -412,15 +417,15 @@ esp_err_t audio_playback::play_audio_buffer_impl(const uint8_t* buffer, size_t b
 
     if (duration_limit_seconds > 0.0f) {
         ESP_LOGI(TAG, "Playing audio buffer (%zu bytes, %u Hz, %u ch, %u bit) - limited to %.1f seconds",
-                 buffer_size, buffer_sample_rate_hz,
-                 static_cast<uint32_t>(buffer_channels),
-                 static_cast<uint32_t>(buffer_bits),
+                 buffer_size, static_cast<unsigned>(buffer_sample_rate_hz),
+                 static_cast<unsigned>(buffer_channels),
+                 static_cast<unsigned>(buffer_bits),
                  duration_limit_seconds);
     } else {
         ESP_LOGI(TAG, "Playing audio buffer (%zu bytes, %u Hz, %u ch, %u bit) - full buffer",
-                 buffer_size, buffer_sample_rate_hz,
-                 static_cast<uint32_t>(buffer_channels),
-                 static_cast<uint32_t>(buffer_bits));
+                 buffer_size, static_cast<unsigned>(buffer_sample_rate_hz),
+                 static_cast<unsigned>(buffer_channels),
+                 static_cast<unsigned>(buffer_bits));
     }
 
     const uint32_t system_sample_rate_hz = static_cast<uint32_t>(parent_->sample_rate);
@@ -448,8 +453,13 @@ esp_err_t audio_playback::play_audio_buffer_impl(const uint8_t* buffer, size_t b
             return ret;
         }
         ESP_LOGI(TAG, "Audio format converted: %u Hz, %u bit, %u ch -> %u Hz, %u bit, %u ch (%zu -> %zu bytes)",
-                 buffer_sample_rate_hz, static_cast<uint32_t>(buffer_bits), static_cast<uint32_t>(buffer_channels),
-                 system_sample_rate_hz, system_bits, system_channels, buffer_size, converted_size);
+                 static_cast<unsigned>(buffer_sample_rate_hz),
+                 static_cast<unsigned>(buffer_bits),
+                 static_cast<unsigned>(buffer_channels),
+                 static_cast<unsigned>(system_sample_rate_hz),
+                 static_cast<unsigned>(system_bits),
+                 static_cast<unsigned>(system_channels),
+                 buffer_size, converted_size);
     }
 
     const bool using_converted = converted_buffer != nullptr;
@@ -567,7 +577,7 @@ esp_err_t audio_playback::play_audio_buffer(const uint8_t* buffer, size_t buffer
     }
 
     if (buffer_sample_rate_hz == 0) {
-        ESP_LOGE(TAG, "Invalid sample rate: %u Hz", buffer_sample_rate_hz);
+        ESP_LOGE(TAG, "Invalid sample rate: %u Hz", static_cast<unsigned>(buffer_sample_rate_hz));
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -615,9 +625,9 @@ esp_err_t audio_playback::play_audio_buffer(const uint8_t* buffer, size_t buffer
     }
 
     ESP_LOGI(TAG, "Async buffer playback task started (%zu bytes, %u Hz, %u ch, %u bit)",
-             buffer_size, buffer_sample_rate_hz,
-             static_cast<uint32_t>(buffer_channels),
-             static_cast<uint32_t>(buffer_bits));
+             buffer_size, static_cast<unsigned>(buffer_sample_rate_hz),
+             static_cast<unsigned>(buffer_channels),
+             static_cast<unsigned>(buffer_bits));
     return ESP_OK;
 }
 
@@ -771,7 +781,7 @@ esp_err_t audio_playback::clear_audio_pipeline(uint32_t silence_duration_ms)
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGI(TAG, "Clearing audio pipeline with %lu ms silence...", silence_duration_ms);
+    ESP_LOGI(TAG, "Clearing audio pipeline with %lu ms silence...", static_cast<unsigned long>(silence_duration_ms));
 
     uint32_t sample_rate_hz = static_cast<uint32_t>(parent_->sample_rate);
     uint32_t channels = static_cast<uint32_t>(parent_->tx_channels);
