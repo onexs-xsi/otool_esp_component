@@ -873,6 +873,270 @@ esp_err_t bmi270_tools::enter_suspend_mode(bool suspend_accel, bool suspend_gyro
     return ESP_OK;
 }
 
+esp_err_t bmi270_tools::prepare_for_sleep(bool keep_motion_interrupt)
+{
+    if (!_initialized) {
+        ESP_LOGE(TAG, "BMI270 not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t first_err = ESP_OK;
+    auto keep_first_error = [&first_err](esp_err_t err) {
+        if (first_err == ESP_OK && err != ESP_OK) {
+            first_err = err;
+        }
+    };
+
+    ESP_LOGI(TAG, "Preparing BMI270 for sleep (motion_wake=%s)", keep_motion_interrupt ? "on" : "off");
+
+    // 先读取一次中断状态，清除可能锁存/挂起的BMI事件。
+    keep_first_error(clear_interrupt());
+
+    const bool aux_was_enabled = is_magnetometer_enabled();
+
+    // 如果曾经通过AUX配置过BMM150，先切到AUX手动模式，把BMM150自身放入suspend。
+    // 仅关闭BMI270的PWR_CTRL/AUX位不一定会清除BMM150内部运行状态。
+    if (aux_was_enabled) {
+        struct bmi2_sens_config aux_config = {};
+        aux_config.type = BMI2_AUX;
+        int8_t aux_cfg_rslt = BMI2_OK;
+        switch (_current_mode) {
+            case MODE_CONTEXT:
+                aux_cfg_rslt = bmi270_context_get_sensor_config(&aux_config, 1, &_bmi270_dev);
+                break;
+            case MODE_BASE:
+                aux_cfg_rslt = bmi270_get_sensor_config(&aux_config, 1, &_bmi270_dev);
+                break;
+            case MODE_LEGACY:
+            case MODE_MAXIMUM_FIFO:
+            default:
+                aux_cfg_rslt = BMI2_E_INVALID_SENSOR;
+                break;
+        }
+        if (aux_cfg_rslt == BMI2_OK) {
+            aux_config.cfg.aux.aux_en = BMI2_ENABLE;
+            aux_config.cfg.aux.manual_en = BMI2_ENABLE;
+            switch (_current_mode) {
+                case MODE_CONTEXT:
+                    aux_cfg_rslt = bmi270_context_set_sensor_config(&aux_config, 1, &_bmi270_dev);
+                    break;
+                case MODE_BASE:
+                    aux_cfg_rslt = bmi270_set_sensor_config(&aux_config, 1, &_bmi270_dev);
+                    break;
+                case MODE_LEGACY:
+                case MODE_MAXIMUM_FIFO:
+                default:
+                    aux_cfg_rslt = BMI2_E_INVALID_SENSOR;
+                    break;
+            }
+        }
+        if (aux_cfg_rslt == BMI2_OK) {
+            struct bmm150_settings bmm_sleep_settings = _bmm150_mag_settings;
+            bmm_sleep_settings.pwr_mode = BMM150_POWERMODE_SUSPEND;
+            int8_t bmm_rslt = bmm150_set_op_mode(&bmm_sleep_settings, &_bmm150_dev);
+            if (bmm_rslt != BMM150_OK) {
+                ESP_LOGW(TAG, "BMM150 suspend via API failed: %d", bmm_rslt);
+                uint8_t bmm_power_off = BMM150_POWER_CNTRL_DISABLE;
+                int8_t aux_wr_rslt = bmi2_write_aux_man_mode(BMM150_REG_POWER_CONTROL,
+                                                             &bmm_power_off,
+                                                             1,
+                                                             &_bmi270_dev);
+                if (aux_wr_rslt != BMI2_OK) {
+                    ESP_LOGW(TAG, "BMM150 power off fallback failed: %d", aux_wr_rslt);
+                    keep_first_error(ESP_FAIL);
+                }
+            } else {
+                ESP_LOGI(TAG, "BMM150 entered suspend mode");
+            }
+        } else {
+            ESP_LOGW(TAG, "Skip BMM150 suspend, AUX config unavailable: %d", aux_cfg_rslt);
+        }
+    } else {
+        ESP_LOGI(TAG, "BMM150 was not enabled, skip suspend command");
+    }
+
+    if (!keep_motion_interrupt) {
+        // 不需要BMI唤醒时，断开特征中断映射并关闭INT输出，避免INT1继续影响PM1 GPIO0。
+        struct bmi2_sens_int_config int_unmap[3] = {};
+        int_unmap[0].type = BMI2_SIG_MOTION;
+        int_unmap[0].hw_int_pin = BMI2_INT_NONE;
+        int_unmap[1].type = BMI2_ANY_MOTION;
+        int_unmap[1].hw_int_pin = BMI2_INT_NONE;
+        int_unmap[2].type = BMI2_NO_MOTION;
+        int_unmap[2].hw_int_pin = BMI2_INT_NONE;
+
+        int8_t map_rslt = BMI2_OK;
+        switch (_current_mode) {
+            case MODE_CONTEXT:
+                map_rslt = bmi270_context_map_feat_int(int_unmap, 3, &_bmi270_dev);
+                break;
+            case MODE_BASE:
+                map_rslt = bmi270_map_feat_int(int_unmap, 3, &_bmi270_dev);
+                break;
+            case MODE_LEGACY:
+            case MODE_MAXIMUM_FIFO:
+            default:
+                map_rslt = BMI2_E_INVALID_SENSOR;
+                break;
+        }
+        if (map_rslt != BMI2_OK) {
+            ESP_LOGW(TAG, "Failed to unmap BMI270 motion interrupts: %d", map_rslt);
+            keep_first_error(ESP_FAIL);
+        }
+
+        keep_first_error(disable_interrupt(INT_PIN_BOTH));
+    } else {
+        // 保留运动唤醒时，只保持INT1为开漏低有效，避免推挽输出和PM1侧冲突。
+        keep_first_error(enable_interrupt(INT_PIN_1, false, true, false));
+        keep_first_error(map_interrupt_to_pin(BMI2_SIG_MOTION, INT_PIN_1));
+    }
+
+    // 睡前关闭BMM150/AUX相关上拉。init(true)中曾配置2k AUX pull-up，
+    // 若L3B随后断电，AUX上拉可能通过BMM150侧反灌，造成mA级漏电。
+    uint8_t aux_pull_off = BMI2_ASDA_PUPSEL_OFF;
+    int8_t trim_rslt = bmi2_set_regs(BMI2_AUX_IF_TRIM, &aux_pull_off, 1, &_bmi270_dev);
+    if (trim_rslt != BMI2_OK) {
+        ESP_LOGW(TAG, "Failed to disable BMI270 AUX pull-up: %d", trim_rslt);
+        keep_first_error(ESP_FAIL);
+    } else {
+        ESP_LOGI(TAG, "BMI270 AUX pull-up disabled");
+    }
+
+    // 明确关闭AUX接口，避免ASDA/ASCL在L3B断电后继续保持驱动或上拉状态。
+    uint8_t if_conf = 0;
+    int8_t if_rslt = bmi2_get_regs(BMI2_IF_CONF_ADDR, &if_conf, 1, &_bmi270_dev);
+    if (if_rslt == BMI2_OK) {
+        if_conf &= ~BMI2_AUX_IF_EN_MASK;
+        if_rslt = bmi2_set_regs(BMI2_IF_CONF_ADDR, &if_conf, 1, &_bmi270_dev);
+    }
+    if (if_rslt != BMI2_OK) {
+        ESP_LOGW(TAG, "Failed to disable BMI270 AUX interface: %d", if_rslt);
+        keep_first_error(ESP_FAIL);
+    } else {
+        ESP_LOGI(TAG, "BMI270 AUX interface disabled");
+    }
+
+    // 关闭不需要的传感器。保留BMI唤醒时仅保留加速度/运动特征，其它全部关闭。
+    uint8_t sleep_sensors[6] = {};
+    uint8_t sleep_count = 0;
+    if (!keep_motion_interrupt) {
+        sleep_sensors[sleep_count++] = BMI2_SIG_MOTION;
+        sleep_sensors[sleep_count++] = BMI2_ANY_MOTION;
+        sleep_sensors[sleep_count++] = BMI2_NO_MOTION;
+        sleep_sensors[sleep_count++] = BMI2_ACCEL;
+    }
+    sleep_sensors[sleep_count++] = BMI2_GYRO;
+    sleep_sensors[sleep_count++] = BMI2_AUX;
+
+    int8_t dis_rslt = BMI2_OK;
+    switch (_current_mode) {
+        case MODE_CONTEXT:
+            dis_rslt = bmi270_context_sensor_disable(sleep_sensors, sleep_count, &_bmi270_dev);
+            break;
+        case MODE_BASE:
+            dis_rslt = bmi270_sensor_disable(sleep_sensors, sleep_count, &_bmi270_dev);
+            break;
+        case MODE_LEGACY:
+        case MODE_MAXIMUM_FIFO:
+        default:
+            dis_rslt = BMI2_E_INVALID_SENSOR;
+            break;
+    }
+    if (dis_rslt != BMI2_OK) {
+        ESP_LOGW(TAG, "Failed to disable BMI270 sleep sensors: %d", dis_rslt);
+        keep_first_error(ESP_FAIL);
+    }
+
+    for (uint8_t i = 0; i < sleep_count; ++i) {
+        _enabled_sensors_mask &= ~(1ULL << sleep_sensors[i]);
+    }
+
+    // 最后直接收敛PWR_CTRL，确保ACC/GYR/AUX电源位处于期望状态。
+    uint8_t pwr_ctrl = keep_motion_interrupt ? BMI2_ACC_EN_MASK : 0x00;
+    int8_t pwr_rslt = bmi2_set_regs(BMI2_PWR_CTRL_ADDR, &pwr_ctrl, 1, &_bmi270_dev);
+    if (pwr_rslt != BMI2_OK) {
+        ESP_LOGW(TAG, "Failed to set BMI270 PWR_CTRL for sleep: %d", pwr_rslt);
+        keep_first_error(ESP_FAIL);
+    } else {
+        ESP_LOGI(TAG, "BMI270 PWR_CTRL set to 0x%02X", pwr_ctrl);
+    }
+
+    if (!keep_motion_interrupt) {
+        // 不需要BMI唤醒时，做一次不可恢复式sleep shutdown：清掉feature engine、FIFO和中断状态。
+        // 注意：不要调用soft_reset()封装，它会复位后恢复运行态配置；这里要让BMI270停在默认低功耗态。
+        int8_t fifo_rslt = bmi2_set_fifo_config(BMI2_FIFO_ALL_EN, BMI2_DISABLE, &_bmi270_dev);
+        if (fifo_rslt != BMI2_OK) {
+            ESP_LOGW(TAG, "Failed to disable BMI270 FIFO before shutdown: %d", fifo_rslt);
+            keep_first_error(ESP_FAIL);
+        }
+
+        int8_t reset_rslt = bmi2_soft_reset(&_bmi270_dev);
+        if (reset_rslt != BMI2_OK) {
+            ESP_LOGW(TAG, "BMI270 sleep soft reset failed: %d", reset_rslt);
+            keep_first_error(ESP_FAIL);
+        } else {
+            ESP_LOGI(TAG, "BMI270 sleep soft reset done");
+        }
+
+        uint8_t reg_zero = 0x00;
+        uint8_t reg_if_conf = 0x00;
+        uint8_t reg_aux_trim = BMI2_ASDA_PUPSEL_OFF;
+        int8_t post_rslt = bmi2_set_regs(BMI2_PWR_CTRL_ADDR, &reg_zero, 1, &_bmi270_dev);
+        if (post_rslt == BMI2_OK) {
+            post_rslt = bmi2_set_regs(BMI2_INT1_IO_CTRL_ADDR, &reg_zero, 1, &_bmi270_dev);
+        }
+        if (post_rslt == BMI2_OK) {
+            post_rslt = bmi2_set_regs(BMI2_INT2_IO_CTRL_ADDR, &reg_zero, 1, &_bmi270_dev);
+        }
+        if (post_rslt == BMI2_OK) {
+            post_rslt = bmi2_set_regs(BMI2_INT1_MAP_FEAT_ADDR, &reg_zero, 1, &_bmi270_dev);
+        }
+        if (post_rslt == BMI2_OK) {
+            post_rslt = bmi2_set_regs(BMI2_INT2_MAP_FEAT_ADDR, &reg_zero, 1, &_bmi270_dev);
+        }
+        if (post_rslt == BMI2_OK) {
+            post_rslt = bmi2_set_regs(BMI2_INT_MAP_DATA_ADDR, &reg_zero, 1, &_bmi270_dev);
+        }
+        if (post_rslt == BMI2_OK) {
+            post_rslt = bmi2_set_regs(BMI2_AUX_IF_TRIM, &reg_aux_trim, 1, &_bmi270_dev);
+        }
+        if (post_rslt == BMI2_OK) {
+            post_rslt = bmi2_get_regs(BMI2_IF_CONF_ADDR, &reg_if_conf, 1, &_bmi270_dev);
+        }
+        if (post_rslt == BMI2_OK) {
+            reg_if_conf &= ~BMI2_AUX_IF_EN_MASK;
+            post_rslt = bmi2_set_regs(BMI2_IF_CONF_ADDR, &reg_if_conf, 1, &_bmi270_dev);
+        }
+        if (post_rslt == BMI2_OK) {
+            post_rslt = bmi2_set_adv_power_save(BMI2_ENABLE, &_bmi270_dev);
+        }
+        if (post_rslt != BMI2_OK) {
+            ESP_LOGW(TAG, "BMI270 post-reset shutdown register setup failed: %d", post_rslt);
+            keep_first_error(ESP_FAIL);
+        } else {
+            ESP_LOGI(TAG, "BMI270 post-reset shutdown registers applied");
+        }
+
+        _enabled_sensors_mask = 0;
+        _initialized = false;
+    }
+
+    uint8_t reg_pwr_ctrl = 0xFF;
+    uint8_t reg_aux_trim = 0xFF;
+    uint8_t reg_if_conf = 0xFF;
+    uint8_t reg_int1 = 0xFF;
+    uint8_t reg_int2 = 0xFF;
+    (void)bmi2_get_regs(BMI2_PWR_CTRL_ADDR, &reg_pwr_ctrl, 1, &_bmi270_dev);
+    (void)bmi2_get_regs(BMI2_AUX_IF_TRIM, &reg_aux_trim, 1, &_bmi270_dev);
+    (void)bmi2_get_regs(BMI2_IF_CONF_ADDR, &reg_if_conf, 1, &_bmi270_dev);
+    (void)bmi2_get_regs(BMI2_INT1_IO_CTRL_ADDR, &reg_int1, 1, &_bmi270_dev);
+    (void)bmi2_get_regs(BMI2_INT2_IO_CTRL_ADDR, &reg_int2, 1, &_bmi270_dev);
+    ESP_LOGI(TAG, "BMI sleep regs: PWR_CTRL=0x%02X AUX_TRIM=0x%02X IF_CONF=0x%02X INT1=0x%02X INT2=0x%02X",
+             reg_pwr_ctrl, reg_aux_trim, reg_if_conf, reg_int1, reg_int2);
+
+    return first_err;
+}
+
 esp_err_t bmi270_tools::exit_suspend_mode()
 {
     if (!_initialized) {

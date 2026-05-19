@@ -272,6 +272,12 @@ public:
     esp_err_t enter_suspend_mode(bool suspend_accel = true, bool suspend_gyro = true, bool suspend_aux = true);
 
     /**
+     * @brief 睡前收敛BMI270/BMM150状态，关闭不需要的传感器、中断输出和AUX上拉
+     * @param keep_motion_interrupt true=保留加速度/运动中断用于唤醒，false=完全低功耗关闭
+     */
+    esp_err_t prepare_for_sleep(bool keep_motion_interrupt = false);
+
+    /**
      * @brief 退出suspend模式恢复正常操作
      * @return ESP_OK 成功，其他值失败
      */
