@@ -987,8 +987,10 @@ esp_err_t bmi270_tools::prepare_for_sleep(bool keep_motion_interrupt)
         keep_first_error(disable_interrupt(INT_PIN_BOTH));
     } else {
         // 保留运动唤醒时，只保持INT1为开漏低有效，避免推挽输出和PM1侧冲突。
+        // 使用 ANY_MOTION（=4）而非 SIG_MOTION：SIG_MOTION 要求设备先静止数分钟才能触发，
+        // 不适合唤醒场景；ANY_MOTION 检测任意超阈值运动，响应更及时。
         keep_first_error(enable_interrupt(INT_PIN_1, false, true, false));
-        keep_first_error(map_interrupt_to_pin(BMI2_SIG_MOTION, INT_PIN_1));
+        keep_first_error(map_interrupt_to_pin(BMI2_ANY_MOTION, INT_PIN_1));
     }
 
     // 睡前关闭BMM150/AUX相关上拉。init(true)中曾配置2k AUX pull-up，
