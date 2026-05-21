@@ -237,6 +237,11 @@ esp_err_t audio_tools::es8311_init(audio_channels_t channels, es8311_path_mode_t
         record_dev = codec_handle;
     }
 
+    // 保存接口对象，便于 deinit 时正确释放（避免泄漏）
+    es8311_ctrl_if  = ctrl_if;
+    es8311_gpio_if  = gpio_if;
+    es8311_codec_if = codec_if;
+
     es8311_work_mode = requested_mode;
     es8311_initialized = true;
     es8311_sleeping = false;
@@ -284,6 +289,20 @@ esp_err_t audio_tools::es8311_deinit()
 
     es8311_dev_handle = NULL;
     es8311_work_mode = ESP_CODEC_DEV_WORK_MODE_NONE;
+
+    // 释放 init 时创建的接口对象，避免泄漏
+    if (es8311_codec_if) {
+        audio_codec_delete_codec_if(es8311_codec_if);
+        es8311_codec_if = nullptr;
+    }
+    if (es8311_gpio_if) {
+        audio_codec_delete_gpio_if(es8311_gpio_if);
+        es8311_gpio_if = nullptr;
+    }
+    if (es8311_ctrl_if) {
+        audio_codec_delete_ctrl_if(es8311_ctrl_if);
+        es8311_ctrl_if = nullptr;
+    }
 
     decr_i2s_user();
 

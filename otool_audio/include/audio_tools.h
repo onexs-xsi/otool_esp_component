@@ -138,6 +138,15 @@ private:
     // 共享 I2S 数据接口
     const audio_codec_data_if_t *shared_i2s_data_if = nullptr; ///< 共享的 I2S 数据接口（避免重复创建）
 
+    // ES8311 codec 接口对象（init 时创建，deinit 时释放，避免泄漏）
+    const audio_codec_ctrl_if_t *es8311_ctrl_if = nullptr;
+    const audio_codec_gpio_if_t *es8311_gpio_if = nullptr;
+    const audio_codec_if_t      *es8311_codec_if = nullptr;
+
+    // ES7210 codec 接口对象（init 时创建，deinit 时释放，避免泄漏）
+    const audio_codec_ctrl_if_t *es7210_ctrl_if = nullptr;
+    const audio_codec_if_t      *es7210_codec_if = nullptr;
+
     // ESP-SR AFE 子对象
     audio_sr_afe* sr_afe_ = nullptr;        ///< ESP-SR AFE 对象指针(用于 AEC 等功能)
 
@@ -339,10 +348,16 @@ public:
 
     /**
      * @brief 去初始化音频系统
-     * 
+     *
+     * @param for_deep_sleep true=深度睡眠路径，跳过 i2s_del_channel 与 DMA
+     *        描述符释放（HP 域断电后会整体复位）。默认 false，常规释放路径。
      * @return esp_err_t 返回操作结果
+     *
+     * @note 在 ESP32-P4 深度睡眠流程上调用 i2s_del_channel 会触发
+     *       i2s_free_dma_desc 中的 free()，已观察到 TLSF 堆元数据断言崩溃；
+     *       且这一释放对深度睡眠毫无价值（HP 域整体断电后内存复位）。
      */
-    esp_err_t audio_system_deinit();
+    esp_err_t audio_system_deinit(bool for_deep_sleep = false);
 
     /**
      * @brief 使ES8311进入睡眠模式

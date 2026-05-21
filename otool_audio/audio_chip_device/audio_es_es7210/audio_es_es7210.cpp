@@ -227,7 +227,11 @@ esp_err_t audio_tools::es7210_init(audio_channels_t channels, audio_mic_channel_
         // 不要删除共享接口
         return ret;
     }
-    
+
+    // 保存接口对象，便于 deinit 时正确释放（避免泄漏）
+    es7210_ctrl_if  = ctrl_if;
+    es7210_codec_if = codec_if;
+
     // 标记为已初始化，以便后续的 mute/gain 操作可以正常执行
     this->mic_channels = effective_mic_channels;
     es7210_initialized = true;
@@ -272,7 +276,7 @@ esp_err_t audio_tools::es7210_deinit()
     }
 
     ESP_LOGI(TAG, "Deinitializing ES7210...");
-    
+
     // 关闭并删除录音设备
     if (record_dev) {
         esp_codec_dev_close(record_dev);
@@ -283,7 +287,17 @@ esp_err_t audio_tools::es7210_deinit()
     rx_configured = false;
     rx_tdm_slot_count = 0;
     es7210_use_tdm = false;
-    
+
+    // 释放 init 时创建的接口对象，避免泄漏
+    if (es7210_codec_if) {
+        audio_codec_delete_codec_if(es7210_codec_if);
+        es7210_codec_if = nullptr;
+    }
+    if (es7210_ctrl_if) {
+        audio_codec_delete_ctrl_if(es7210_ctrl_if);
+        es7210_ctrl_if = nullptr;
+    }
+
     es7210_initialized = false;
     decr_i2s_user();
     es7210_sleeping = false;

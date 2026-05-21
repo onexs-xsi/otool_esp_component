@@ -531,43 +531,96 @@ esp_err_t audio_tools::audio_system_init(i2c_master_bus_handle_t i2c_bus_handle,
     return ESP_OK;
 }
 
-esp_err_t audio_tools::audio_system_deinit()
+esp_err_t audio_tools::audio_system_deinit(bool for_deep_sleep)
 {
     // 获取互斥锁保护
     if (audio_mutex && xSemaphoreTake(audio_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
         ESP_LOGE(TAG, "Failed to acquire audio mutex for deinit, force deinit anyway");
         // 继续执行，但可能有风险
     }
-    
+
     if (!system_initialized) {
         ESP_LOGW(TAG, "Audio system not initialized");
         if (audio_mutex) xSemaphoreGive(audio_mutex);
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Deinitializing audio system...");
+    ESP_LOGI(TAG, "Deinitializing audio system (for_deep_sleep=%s)...",
+             for_deep_sleep ? "YES" : "NO");
+
+    // 在释放任何 codec/I2S 资源前，先停掉所有后台任务，避免它们在
+    // codec/I2S 资源释放途中继续访问 play_dev/record_dev/DMA 缓冲区，
+    // 进而破坏堆元数据。
+    if (sr_afe_ && sr_afe_->aec_session_is_running()) {
+        ESP_LOGI(TAG, "Stopping running AEC session before deinit");
+        esp_err_t sr_ret = sr_afe_->aec_session_stop();
+        if (sr_ret != ESP_OK) {
+            ESP_LOGW(TAG, "AEC session stop reported: %s", esp_err_to_name(sr_ret));
+        }
+    }
+    if (recorder_ && recorder_->record_session_is_running()) {
+        ESP_LOGI(TAG, "Stopping running record session before deinit");
+        esp_err_t rec_ret = recorder_->record_session_stop();
+        if (rec_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Record session stop reported: %s", esp_err_to_name(rec_ret));
+        }
+    }
+    if (playback_ && playback_->is_async_playback_running()) {
+        ESP_LOGI(TAG, "Stopping running async playback before deinit");
+        esp_err_t pb_ret = playback_->stop_async_playback();
+        if (pb_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Async playback stop reported: %s", esp_err_to_name(pb_ret));
+        }
+    }
+
     suppress_release = true;  // 避免在两个 codec 先后 deinit 间隙多次释放 I2S
-    
+
     // 去初始化所有已初始化的模块（各自安全判断）
     if (es8311_initialized) es8311_deinit();
     if (es7210_initialized) es7210_deinit();
-    
+
     // 释放共享的 I2S 数据接口
     if (shared_i2s_data_if) {
         audio_codec_delete_data_if(shared_i2s_data_if);
         shared_i2s_data_if = nullptr;
         ESP_LOGI(TAG, "Shared I2S data interface deleted");
     }
-    
-    // 现在统一处理 I2S 释放
-    suppress_release = false;
-    try_release_i2s();
-    // 若两个都释放了会自动释放 I2S
-    
+
+    if (for_deep_sleep) {
+        // 深度睡眠路径：仅 disable I2S 通道，不调用 i2s_del_channel。
+        // 原因：ESP32-P4 进入 deep sleep 时整个 HP 域断电，DMA 描述符与
+        // 内部 SRAM 都会被复位；显式 free() DMA 描述符曾触发 TLSF 堆元
+        // 数据断言（i2s_free_dma_desc 中 free() 失败）。
+        if (tx_handle && tx_configured) {
+            esp_err_t r = i2s_channel_disable(tx_handle);
+            if (r != ESP_OK && r != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "Disable TX before sleep failed: %s", esp_err_to_name(r));
+            }
+            tx_configured = false;
+        }
+        if (rx_handle && rx_configured) {
+            esp_err_t r = i2s_channel_disable(rx_handle);
+            if (r != ESP_OK && r != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "Disable RX before sleep failed: %s", esp_err_to_name(r));
+            }
+            rx_configured = false;
+        }
+        // 故意保留 tx_handle/rx_handle，不调用 i2s_del_channel/i2s_free_dma_desc。
+        // 引用计数清零但跳过通道释放。
+        i2s_user_count = 0;
+        suppress_release = false;
+        ESP_LOGI(TAG,
+                 "Deep-sleep path: skipping i2s_del_channel (HP domain power-off will reset DMA)");
+    } else {
+        // 常规释放路径
+        suppress_release = false;
+        try_release_i2s();
+    }
+
     system_initialized = false;
-    
+
     ESP_LOGI(TAG, "Audio system deinitialized successfully");
-    
+
     // 释放互斥锁
     if (audio_mutex) xSemaphoreGive(audio_mutex);
     return ESP_OK;
