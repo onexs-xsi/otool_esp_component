@@ -88,6 +88,8 @@ class audio_sr_afe;
  */
 class audio_tools {
 private:
+    using pa_power_callback_t = esp_err_t (*)(void *arg, bool on);
+
     esp_codec_dev_handle_t play_dev;        ///< 播放设备句柄（ES8311）
     esp_codec_dev_handle_t record_dev;      ///< 录音设备句柄（ES7210或ES8311 ADC）
     i2s_chan_handle_t tx_handle;            ///< I2S发送通道句柄
@@ -157,13 +159,22 @@ private:
     // 系统级互斥锁（用于保护 deinit 等操作，also shared by audio_playback）
     SemaphoreHandle_t audio_mutex = nullptr;
 
+    // 外部板级 PA 控制回调。audio_tools 保持通用，不直接依赖具体板卡类型。
+    pa_power_callback_t pa_power_callback = nullptr;
+    void *pa_power_callback_arg = nullptr;
+    TaskHandle_t pa_enable_task_handle = nullptr;
+    uint32_t pa_enable_delay_ms = 0;
+
     // 内部辅助函数
     esp_err_t ensure_i2s_channel();         ///< 确保已创建 I2S 通道
     void try_release_i2s();                 ///< 在引用计数为 0 时释放 I2S 通道
     void incr_i2s_user();                   ///< 增加 I2S 使用者计数
     void decr_i2s_user();                   ///< 减少 I2S 使用者计数
+    static void delayed_pa_enable_task_entry(void *arg);
 
 public:
+    using PaPowerCallback = pa_power_callback_t;
+
     // 声明友元类,允许其访问私有成员
     friend class audio_sr_afe;
     friend class audio_playback;
@@ -686,6 +697,37 @@ public:
      * @return esp_err_t 返回操作结果
      */
     esp_err_t set_volume(float volume);
+
+    /**
+     * @brief 注册板级功放电源控制回调
+     *
+     * audio_tools 是通用音频组件，具体板卡通过该回调提供 PA 开关实现。
+     *
+     * @param callback 回调函数，参数为 (用户上下文, 是否开启)
+     * @param arg 用户上下文指针
+     */
+    void set_pa_power_callback(PaPowerCallback callback, void *arg);
+
+    /**
+     * @brief 立即设置功放电源
+     *
+     * @param on true=打开，false=关闭
+     * @return esp_err_t 返回操作结果
+     */
+    esp_err_t set_pa_power(bool on);
+
+    /**
+     * @brief 异步延迟打开功放
+     *
+     * @param delay_ms 延迟时间，单位 ms
+     * @return esp_err_t 返回调度或立即执行结果
+     */
+    esp_err_t enable_pa_after_delay(uint32_t delay_ms = 500);
+
+    /**
+     * @brief 取消尚未执行的异步功放开启动作
+     */
+    void cancel_pending_pa_enable();
 
     /**
      * @brief 获取当前播放音量

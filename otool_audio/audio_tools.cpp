@@ -152,6 +152,8 @@ audio_tools::audio_tools(gpio_num_t bck_pin, gpio_num_t mck_pin, gpio_num_t data
 audio_tools::~audio_tools()
 {
     ESP_LOGI(TAG, "audio_tools object destroyed");
+
+    cancel_pending_pa_enable();
     
     // 先清理子对象
     if (playback_) {
@@ -533,6 +535,8 @@ esp_err_t audio_tools::audio_system_init(i2c_master_bus_handle_t i2c_bus_handle,
 
 esp_err_t audio_tools::audio_system_deinit(bool for_deep_sleep)
 {
+    cancel_pending_pa_enable();
+
     // 获取互斥锁保护
     if (audio_mutex && xSemaphoreTake(audio_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
         ESP_LOGE(TAG, "Failed to acquire audio mutex for deinit, force deinit anyway");
@@ -700,6 +704,93 @@ void audio_tools::set_i2s_pin_config(gpio_num_t bck_pin, gpio_num_t mck_pin, gpi
     
     ESP_LOGI(TAG, "I2S pin config updated: BCK=%d, MCK=%d, DATA_IN=%d, DATA_OUT=%d, WS=%d, PA=%d", 
              bck_pin, mck_pin, data_in_pin, data_out_pin, ws_pin, pa_pin);
+}
+
+void audio_tools::set_pa_power_callback(PaPowerCallback callback, void *arg)
+{
+    pa_power_callback = callback;
+    pa_power_callback_arg = arg;
+    ESP_LOGI(TAG, "Audio PA power callback %s", callback ? "registered" : "cleared");
+}
+
+esp_err_t audio_tools::set_pa_power(bool on)
+{
+    if (pa_power_callback == nullptr) {
+        ESP_LOGE(TAG, "Audio PA power callback is not registered");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return pa_power_callback(pa_power_callback_arg, on);
+}
+
+void audio_tools::delayed_pa_enable_task_entry(void *arg)
+{
+    auto *audio = static_cast<audio_tools *>(arg);
+    if (audio == nullptr) {
+        ESP_LOGE(TAG, "Audio PA enable task got null audio_tools");
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    const uint32_t delay_ms = audio->pa_enable_delay_ms;
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+
+    esp_err_t ret = audio->set_pa_power(true);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Audio PA enabled after %lu ms delay",
+                 static_cast<unsigned long>(delay_ms));
+    } else {
+        ESP_LOGE(TAG, "Failed to enable Audio PA: %s", esp_err_to_name(ret));
+    }
+
+    audio->pa_enable_task_handle = nullptr;
+    vTaskDelete(nullptr);
+}
+
+esp_err_t audio_tools::enable_pa_after_delay(uint32_t delay_ms)
+{
+    if (pa_power_callback == nullptr) {
+        ESP_LOGE(TAG, "Audio PA power callback is not registered");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    cancel_pending_pa_enable();
+
+    if (delay_ms == 0) {
+        return set_pa_power(true);
+    }
+
+    pa_enable_delay_ms = delay_ms;
+    BaseType_t task_ret = xTaskCreate(delayed_pa_enable_task_entry,
+                                      "audio_pa_on",
+                                      2048,
+                                      this,
+                                      5,
+                                      &pa_enable_task_handle);
+    if (task_ret != pdPASS) {
+        pa_enable_task_handle = nullptr;
+        ESP_LOGE(TAG, "Failed to create Audio PA enable task; enabling immediately");
+        esp_err_t ret = set_pa_power(true);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to enable Audio PA immediately: %s", esp_err_to_name(ret));
+            return ret;
+        }
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
+
+void audio_tools::cancel_pending_pa_enable()
+{
+    if (pa_enable_task_handle == nullptr) {
+        return;
+    }
+
+    TaskHandle_t task = pa_enable_task_handle;
+    pa_enable_task_handle = nullptr;
+    vTaskDelete(task);
+    ESP_LOGI(TAG, "Cancelled pending Audio PA enable task");
 }
 
 // get_available_pcm_count, get_audio_file_name, is_audio_file_available -> inline forwarding in audio_tools.h
@@ -982,4 +1073,3 @@ audio_recorder* audio_tools::get_recorder()
     }
     return recorder_;
 }
-
