@@ -1640,7 +1640,9 @@ int bmi270_tools::configure_magnetometer() {
     }
 
     // 配置BMM150 preset_mode 参数
-    _bmm150_mag_settings.preset_mode = BMM150_PRESETMODE_ENHANCED;
+    // REGULAR(REPXY=4/REPZ=15) 而非 ENHANCED(REPXY=7)：重复次数更低，单次测量更快，
+    // 磁场实际数据率更接近 AUX_ODR 50Hz，指南针指针新鲜度更高；精度对指南针足够。
+    _bmm150_mag_settings.preset_mode = BMM150_PRESETMODE_REGULAR;
     rslt = bmm150_set_presetmode(&_bmm150_mag_settings, &_bmm150_dev);
     if (rslt != BMM150_OK) {
         ESP_LOGE(TAG, "Failed to set BMM150 preset mode: %d", rslt);
@@ -1649,7 +1651,7 @@ int bmi270_tools::configure_magnetometer() {
         return rslt;
     }
     else{
-        ESP_LOGI(TAG, "BMM150 preset mode set to ENHANCED");
+        ESP_LOGI(TAG, "BMM150 preset mode set to REGULAR");
     }
 
     // 配置BMM150 op_mode 参数
