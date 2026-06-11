@@ -35,6 +35,9 @@ class audio_playback {
 private:
     audio_tools* parent_;                                      ///< 父对象指针
     TaskHandle_t playback_task_handle_ = nullptr;              ///< 异步播放任务句柄
+    volatile bool playback_progress_valid_ = false;
+    volatile uint32_t playback_elapsed_ms_ = 0;
+    volatile uint32_t playback_duration_ms_ = 0;
 
 
     struct playback_task_args {
@@ -94,6 +97,11 @@ public:
      * @brief 查询是否存在正在运行的异步播放任务
      */
     bool is_async_playback_running() const { return playback_task_handle_ != nullptr; }
+
+    /**
+     * @brief Get playback progress measured from audio written to the codec.
+     */
+    bool get_playback_progress(uint32_t& elapsed_ms, uint32_t& duration_ms) const;
 
     /**
      * @brief 停止正在运行的异步播放任务

@@ -29,6 +29,13 @@ from dataclasses import dataclass, field
 import shutil
 from datetime import datetime
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(errors="replace")
+        except Exception:
+            pass
+
 # 尝试复用 toolkit 的 ANSI 颜色工具和 msvcrt 支持
 try:
     _toolkit_dir = Path(__file__).resolve().parent.parent
@@ -328,8 +335,8 @@ class CodeUpdater:
         
         self.project_root = project_root
         self.audio_dir = project_root / "audio_playback_material"
-        self.header_file = project_root / "include" / "audio_tools.h"
-        self.cpp_file = project_root / "audio_tools.cpp"
+        self.header_file = project_root / "include" / "audio_types.h"
+        self.cpp_file = project_root / "audio_playback.cpp"
         self.cmake_file = project_root.parent / "CMakeLists.txt"
         
         # 备份目录
@@ -561,7 +568,7 @@ class CodeUpdater:
         
         # 查找 typedef enum { ... } audio_file_type_t; 块
         enum_pattern = re.compile(
-            r'(typedef\s+enum\s*\{)(.*?)(AUDIO_FILE_MAX.*?\}\s*audio_file_type_t\s*;)',
+            r'(typedef\s+enum\s*\{\s*)([^{}]*?)(\s*AUDIO_FILE_MAX[^\n]*\n\}\s*audio_file_type_t\s*;)',
             re.DOTALL
         )
         
@@ -580,7 +587,15 @@ class CodeUpdater:
                 enum_items.append(f"    {info.enum_name},     {comment}")
         
         new_enum_body = "\n".join(enum_items)
-        new_content = content[:match.start(2)] + "\n" + new_enum_body + "\n    " + content[match.start(3):]
+        new_content = (
+            content[:match.start(1)]
+            + match.group(1).rstrip()
+            + "\n"
+            + new_enum_body
+            + "\n    "
+            + match.group(3).lstrip()
+            + content[match.end(3):]
+        )
         
         self.header_file.write_text(new_content, encoding='utf-8')
         print(f"✓ 已更新头文件枚举: {len(audio_files)} 个音频文件（全量更新）")
@@ -599,10 +614,10 @@ class CodeUpdater:
         content = self.cpp_file.read_text(encoding='utf-8')
         
         # 1. 更新外部声明区域
-        content = self._update_extern_declarations(content, audio_files)
+        content = self._update_playback_extern_declarations(content, audio_files)
         
         # 2. 更新数据获取函数区域
-        content = self._update_getter_functions(content, audio_files)
+        content = self._update_playback_getter_functions(content, audio_files)
         
         # 3. 更新 AUDIO_FILE_TABLE 定义
         content = self._update_file_table(content, audio_files)
@@ -666,6 +681,69 @@ class CodeUpdater:
         new_section = "\n".join(functions)
         return content[:start_pos] + new_section + "\n" + content[end_pos:]
     
+    def _update_playback_extern_declarations(self, content: str, audio_files: List[AudioFileInfo]) -> str:
+        """Update embedded PCM extern declarations in audio_playback.cpp."""
+        anchor = "static uint8_t g_silence_chunk[SILENCE_CHUNK_CAPACITY] = {0};"
+        anchor_pos = content.find(anchor)
+        start_pos = content.find("// ============================================================================", anchor_pos)
+        typedef_pos = content.find("typedef bool (*AudioDataGetter)", start_pos)
+
+        if anchor_pos == -1 or start_pos == -1 or typedef_pos == -1:
+            print("⚠ 未找到 audio_playback.cpp 的音频嵌入声明区域，跳过更新")
+            return content
+
+        declarations = [
+            "// ============================================================================",
+            "// 音频文件嵌入声明 - 统一命名规范",
+            "// ============================================================================"
+        ]
+
+        for info in audio_files:
+            declarations.append(f"#ifdef {info.macro_name}")
+            declarations.append(f"extern const uint8_t {info.binary_start_symbol}[];")
+            declarations.append(f"extern const uint8_t {info.binary_end_symbol}[];")
+            declarations.append("#endif")
+            declarations.append("")
+
+        declarations.extend([
+            "// ============================================================================",
+            "// 音频文件元数据表",
+            "// ============================================================================"
+        ])
+
+        new_section = "\n".join(declarations)
+        return content[:start_pos] + new_section + "\n" + content[typedef_pos:]
+
+    def _update_playback_getter_functions(self, content: str, audio_files: List[AudioFileInfo]) -> str:
+        """Update PCM data getter functions in audio_playback.cpp."""
+        typedef_pos = content.find("typedef bool (*AudioDataGetter)")
+        end_pos = content.find("struct AudioFileMetadata {", typedef_pos)
+
+        if typedef_pos == -1 or end_pos == -1:
+            print("⚠ 未找到 audio_playback.cpp 的数据获取函数区域，跳过更新")
+            return content
+
+        start_pos = content.find("\n", typedef_pos)
+        if start_pos == -1 or start_pos >= end_pos:
+            print("⚠ 未找到 audio_playback.cpp 的数据获取函数区域，跳过更新")
+            return content
+        start_pos += 1
+
+        functions = [""]
+
+        for info in audio_files:
+            functions.append(f"#ifdef {info.macro_name}")
+            functions.append(f"static bool {info.getter_func_name}(const uint8_t*& start, size_t& len) {{")
+            functions.append(f"    start = {info.binary_start_symbol};")
+            functions.append(f"    len = {info.binary_end_symbol} - {info.binary_start_symbol};")
+            functions.append("    return true;")
+            functions.append("}")
+            functions.append("#endif")
+            functions.append("")
+
+        new_section = "\n".join(functions)
+        return content[:start_pos] + new_section + content[end_pos:]
+
     def _update_file_table(self, content: str, audio_files: List[AudioFileInfo]) -> str:
         """更新 AUDIO_FILE_TABLE 定义"""
         # 查找表定义区域
@@ -709,21 +787,26 @@ class CodeUpdater:
         
         content = self.cmake_file.read_text(encoding='utf-8')
         
-        # 查找音频配置区域的起始和结束标记
-        start_marker = "# ============================================================================\n# 音频文件嵌入配置"
-        end_marker_pattern = r'# 动态构建EMBED_FILES列表和编译定义'
-        
-        start_pos = content.find(start_marker)
-        end_match = re.search(end_marker_pattern, content)
-        
-        if start_pos == -1 or not end_match:
-            print("⚠ CMakeLists.txt 中未找到音频配置区域标记")
+        playback_dir_pos = content.find("set(AUDIO_PLAYBACK_DIR")
+        configs_pos = content.find("set(AUDIO_FILE_CONFIGS", playback_dir_pos)
+        if playback_dir_pos == -1 or configs_pos == -1:
+            print("⚠ CMakeLists.txt 中未找到 AUDIO_FILE_CONFIGS 配置区域")
             return False
-        
-        # 找到配置区域的实际结束位置（在 set(AUDIO_FILE_CONFIGS 后）
-        config_end_pattern = r'\)\s*\n'
-        config_section = content[start_pos:end_match.start()]
-        local_end = re.search(config_end_pattern, config_section[::-1])
+
+        section_label = "# 音频文件嵌入配置"
+        label_pos = content.find(section_label)
+        if label_pos != -1 and label_pos < playback_dir_pos:
+            start_pos = content.rfind("# ============================================================================", 0, label_pos)
+        else:
+            start_pos = content.rfind("# ============================================================================", 0, playback_dir_pos)
+        if start_pos == -1:
+            start_pos = playback_dir_pos
+
+        end_match = re.search(r'^\)\s*$', content[configs_pos:], re.MULTILINE)
+        if not end_match:
+            print("⚠ CMakeLists.txt 中未找到 AUDIO_FILE_CONFIGS 结束位置")
+            return False
+        end_pos = configs_pos + end_match.end()
         
         # 生成新的配置
         cmake_config = []
@@ -759,7 +842,7 @@ class CodeUpdater:
         cmake_config.append("")
         
         new_section = "\n".join(cmake_config)
-        new_content = content[:start_pos] + new_section + content[end_match.start():]
+        new_content = content[:start_pos] + new_section + "\n" + content[end_pos:].lstrip("\r\n")
         
         self.cmake_file.write_text(new_content, encoding='utf-8')
         
@@ -852,7 +935,9 @@ class CodeUpdater:
         
         # 6. 更新 CMakeLists.txt
         print("步骤 6/6: 更新 CMakeLists.txt...")
-        self.update_cmake_file(audio_files)
+        if not self.update_cmake_file(audio_files):
+            print("✗ 更新 CMakeLists.txt 失败")
+            return False
         print()
         
         print("=" * 70)

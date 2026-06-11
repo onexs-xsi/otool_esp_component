@@ -27,17 +27,19 @@ option(ENABLE_OTOOL_SD         "Enable otool_sd subcomponent"         ON)
 option(ENABLE_OTOOL_RTC_RX8130 "Enable otool_ic_rx8130 subcomponent"  ON)
 
 # ============================================================================
-# 音频文件嵌入配置（供 otool_audio/CMakeLists.txt 使用，由 toolkit.py 解析）
-# 格式：ID:文件名:默认开关:采样率:声道:位深:描述
-# 添加新音频文件：只需在此列表增加一行
+# 音频文件嵌入配置 - 统一命名规范
+# ============================================================================
+# 配置格式：ID:文件名:默认开关:采样率:声道:位深:描述
+# ID规则：自动从文件名生成，统一使用 AUDIO_ 前缀
+# 添加新文件：只需在下面列表中添加一行即可
 # ============================================================================
 set(AUDIO_PLAYBACK_DIR "otool_audio/audio_playback_material")
 
 set(AUDIO_FILE_CONFIGS
     # ID:文件名:默认值:采样率:声道:位深:描述
     "AUDIO_CANDY_WIND_1CH_16K_16BIT_9S:candy_wind_pcm_1ch_16k_16bit_9s.pcm:OFF:16000:1:16:candy_wind 1ch 16000Hz 9.0s"
-    "AUDIO_CANDY_WIND_1CH_44K_16BIT_45S:candy_wind_pcm_1ch_44.1k_16bit_45s.pcm:OFF:44100:1:16:candy_wind 1ch 44100Hz 45.0s"
-    "AUDIO_CANDY_WIND_2CH_16K_16BIT_9S:candy_wind_pcm_2ch_16k_16bit_9s.pcm:ON:16000:2:16:candy_wind 2ch 16000Hz 9.0s"
+    "AUDIO_CANDY_WIND_1CH_44K_16BIT_45S:candy_wind_pcm_1ch_44.1k_16bit_45s.pcm:ON:44100:1:16:candy_wind 1ch 44100Hz 45.0s"
+    "AUDIO_CANDY_WIND_2CH_16K_16BIT_9S:candy_wind_pcm_2ch_16k_16bit_9s.pcm:OFF:16000:2:16:candy_wind 2ch 16000Hz 9.0s"
     "AUDIO_CANDY_WIND_2CH_44K_16BIT_45S:candy_wind_pcm_2ch_44.1k_16bit_45s.pcm:OFF:44100:2:16:candy_wind 2ch 44100Hz 45.0s"
     "AUDIO_SINE_440HZ_2CH_16K_16BIT_10S:sine_440Hz_pcm_2ch_16k_16bit_10s.pcm:OFF:16000:2:16:sine_440Hz 2ch 16000Hz 10.0s"
     "AUDIO_STARTUP_1CH_16K_16BIT_4S:startup_pcm_1ch_16k_16bit_4s.pcm:OFF:16000:1:16:startup 1ch 16000Hz 4.0s"

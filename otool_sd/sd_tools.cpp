@@ -25,7 +25,8 @@ sd_tools::sd_tools()
       mmc_d1_pin(GPIO_NUM_NC), mmc_d2_pin(GPIO_NUM_NC), mmc_d3_pin(GPIO_NUM_NC),
       mmc_internal_pullup(true),
       spi_cs_pin(GPIO_NUM_NC), spi_mosi_pin(GPIO_NUM_NC), spi_miso_pin(GPIO_NUM_NC),
-      spi_clk_pin(GPIO_NUM_NC), spi_host(SPI3_HOST), spi_max_transfer_sz(2048)
+      spi_clk_pin(GPIO_NUM_NC), spi_host(SPI3_HOST), spi_max_transfer_sz(2048),
+      spi_bus_initialized(false)
 {
     ESP_LOGD(TAG, "sd_tools constructor called with performance-optimized defaults");
 }
@@ -239,7 +240,7 @@ esp_err_t sd_tools::mount()
     ESP_LOGI(TAG, "Mounting filesystem to %s", mount_point.c_str());
 
     esp_err_t ret;
-    if (current_mode == SD_MODE_MMC_1BIT || current_mode == SD_MODE_MMC_4BIT) {
+    if (mode == SD_MODE_MMC_1BIT || mode == SD_MODE_MMC_4BIT) {
         ret = init_mmc_mode();
     } else {
         ret = init_spi_mode();
@@ -297,6 +298,9 @@ esp_err_t sd_tools::init_mmc_mode()
     
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.max_freq_khz = max_freq_khz;
+#if CONFIG_IDF_TARGET_ESP32P4
+    host.slot = SDMMC_HOST_SLOT_0;
+#endif
 
     sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
     slot_config.width = (mode == SD_MODE_MMC_4BIT && is_4bit_supported()) ? 4 : 1;
@@ -354,6 +358,7 @@ esp_err_t sd_tools::init_spi_mode()
         ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
         return ret;
     }
+    spi_bus_initialized = true;
 
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = spi_cs_pin;
@@ -366,12 +371,27 @@ esp_err_t sd_tools::init_spi_mode()
     mount_config.max_files = max_files;
     mount_config.allocation_unit_size = allocation_unit_size;
 
-    return esp_vfs_fat_sdspi_mount(mount_point.c_str(), &host, &slot_config, &mount_config, &card);
+    ret = esp_vfs_fat_sdspi_mount(mount_point.c_str(), &host, &slot_config, &mount_config, &card);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SPI filesystem mount failed: %s", esp_err_to_name(ret));
+        cleanup_spi_mode();
+        card = nullptr;
+    }
+
+    return ret;
 }
 
 esp_err_t sd_tools::cleanup_spi_mode()
 {
-    return spi_bus_free(spi_host);
+    if (!spi_bus_initialized) {
+        return ESP_OK;
+    }
+
+    esp_err_t ret = spi_bus_free(spi_host);
+    if (ret == ESP_OK || ret == ESP_ERR_INVALID_STATE) {
+        spi_bus_initialized = false;
+    }
+    return ret;
 }
 
 bool sd_tools::is_4bit_supported() const

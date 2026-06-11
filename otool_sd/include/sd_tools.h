@@ -97,6 +97,7 @@ private:
     gpio_num_t spi_clk_pin;              ///< SPI CLK引脚
     spi_host_device_t spi_host;          ///< SPI主机设备
     uint32_t spi_max_transfer_sz;        ///< SPI最大传输大小
+    bool spi_bus_initialized;            ///< SPI总线是否已初始化
     
     // 内部辅助函数
     esp_err_t init_mmc_mode();           ///< 初始化MMC模式

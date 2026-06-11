@@ -114,7 +114,6 @@ static bool get_startup_2ch_16k_data(const uint8_t*& start, size_t& len) {
     return true;
 }
 #endif
-
 struct AudioFileMetadata {
     audio_file_type_t type;
     const char* filename;
@@ -149,6 +148,240 @@ static const AudioFileMetadata AUDIO_FILE_TABLE[] = {
 };
 
 static constexpr size_t AUDIO_FILE_COUNT = sizeof(AUDIO_FILE_TABLE) / sizeof(AUDIO_FILE_TABLE[0]);
+
+static bool can_stream_convert_i16(audio_data_type_t input_type,
+                                   audio_data_type_t target_type,
+                                   uint32_t input_channels,
+                                   uint32_t target_channels)
+{
+    return input_type == AUDIO_TYPE_INT16 &&
+           (target_type == AUDIO_TYPE_INT16 || target_type == AUDIO_TYPE_INT32) &&
+           (input_channels == 1 || input_channels == 2) &&
+           (target_channels == 1 || target_channels == 2);
+}
+
+static uint8_t* alloc_playback_chunk(size_t bytes)
+{
+    uint8_t* buffer = static_cast<uint8_t*>(heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    if (!buffer) {
+        buffer = static_cast<uint8_t*>(heap_caps_malloc(bytes, MALLOC_CAP_8BIT));
+    }
+    return buffer;
+}
+
+static uint32_t frames_to_ms(uint64_t frames, uint32_t sample_rate)
+{
+    if (sample_rate == 0) {
+        return 0;
+    }
+    return static_cast<uint32_t>((frames * 1000ULL) / sample_rate);
+}
+
+static uint32_t bytes_to_ms(size_t bytes,
+                            uint32_t sample_rate,
+                            uint32_t channels,
+                            audio_data_type_t type)
+{
+    size_t sample_size = 0;
+    switch (type) {
+        case AUDIO_TYPE_INT8: sample_size = 1; break;
+        case AUDIO_TYPE_INT16: sample_size = 2; break;
+        case AUDIO_TYPE_INT32:
+        case AUDIO_TYPE_FLOAT32: sample_size = 4; break;
+        default: return 0;
+    }
+
+    const size_t frame_size = sample_size * channels;
+    if (frame_size == 0) {
+        return 0;
+    }
+    return frames_to_ms(bytes / frame_size, sample_rate);
+}
+
+static void set_progress_elapsed(volatile uint32_t* elapsed_ms,
+                                 uint32_t value_ms,
+                                 uint32_t duration_ms)
+{
+    if (!elapsed_ms) {
+        return;
+    }
+    *elapsed_ms = (duration_ms > 0 && value_ms > duration_ms) ? duration_ms : value_ms;
+}
+
+static int32_t read_i16_sample_for_channel(const int16_t* input,
+                                           size_t frame,
+                                           uint32_t input_channels,
+                                           uint32_t target_channels,
+                                           uint32_t target_channel)
+{
+    if (input_channels == 1) {
+        return input[frame];
+    }
+
+    const int16_t* source_frame = input + frame * input_channels;
+    if (target_channels == 1) {
+        return (static_cast<int32_t>(source_frame[0]) + static_cast<int32_t>(source_frame[1])) / 2;
+    }
+
+    return source_frame[target_channel];
+}
+
+static int32_t interpolate_i16_sample(const int16_t* input,
+                                      size_t frame0,
+                                      size_t frame1,
+                                      uint32_t frac,
+                                      uint32_t input_channels,
+                                      uint32_t target_channels,
+                                      uint32_t target_channel)
+{
+    const int32_t s0 = read_i16_sample_for_channel(input, frame0, input_channels, target_channels, target_channel);
+    const int32_t s1 = read_i16_sample_for_channel(input, frame1, input_channels, target_channels, target_channel);
+    const int64_t mixed = (static_cast<int64_t>(s0) << 32) +
+                          static_cast<int64_t>(s1 - s0) * static_cast<int64_t>(frac);
+    return static_cast<int32_t>(mixed >> 32);
+}
+
+static esp_err_t write_stream_converted_i16(esp_codec_dev_handle_t play_dev,
+                                           const uint8_t* input_data,
+                                           size_t input_size,
+                                           uint32_t input_rate,
+                                           uint32_t input_channels,
+                                           uint32_t target_rate,
+                                           uint32_t target_channels,
+                                           audio_data_type_t target_type,
+                                           bool check_stop_signal,
+                                           float duration_limit_seconds,
+                                           volatile uint32_t* progress_elapsed_ms,
+                                           volatile uint32_t* progress_duration_ms,
+                                           size_t& bytes_written_out,
+                                           size_t& bytes_to_play_out)
+{
+    bytes_written_out = 0;
+    bytes_to_play_out = 0;
+
+    if (!play_dev || !input_data || input_size == 0 || input_rate == 0 || target_rate == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const size_t input_frame_size = sizeof(int16_t) * input_channels;
+    if (input_frame_size == 0 || (input_size % input_frame_size) != 0) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    const size_t target_sample_size = (target_type == AUDIO_TYPE_INT32) ? sizeof(int32_t) :
+                                      (target_type == AUDIO_TYPE_INT16) ? sizeof(int16_t) : 0;
+    if (target_sample_size == 0 || target_channels == 0) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    const size_t input_frames = input_size / input_frame_size;
+    if (input_frames == 0) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    uint64_t output_frames = (static_cast<uint64_t>(input_frames) * target_rate + input_rate / 2) / input_rate;
+    if (output_frames == 0) {
+        output_frames = 1;
+    }
+
+    if (duration_limit_seconds > 0.0f) {
+        const uint64_t limited_frames = static_cast<uint64_t>(duration_limit_seconds * static_cast<float>(target_rate));
+        if (limited_frames > 0 && limited_frames < output_frames) {
+            output_frames = limited_frames;
+        }
+    }
+
+    const size_t target_frame_size = target_sample_size * target_channels;
+    bytes_to_play_out = static_cast<size_t>(output_frames) * target_frame_size;
+    const uint32_t duration_ms = frames_to_ms(output_frames, target_rate);
+    if (progress_duration_ms) {
+        *progress_duration_ms = duration_ms;
+    }
+    set_progress_elapsed(progress_elapsed_ms, 0, duration_ms);
+
+    if (duration_limit_seconds > 0.0f) {
+        ESP_LOGI(TAG, "Duration limit: will stream %zu bytes", bytes_to_play_out);
+    }
+
+    constexpr size_t kOutputFramesPerChunk = 512;
+    const size_t chunk_bytes = kOutputFramesPerChunk * target_frame_size;
+    uint8_t* chunk = alloc_playback_chunk(chunk_bytes);
+    if (!chunk) {
+        ESP_LOGE(TAG, "Failed to allocate streaming playback chunk (%zu bytes)", chunk_bytes);
+        return ESP_ERR_NO_MEM;
+    }
+
+    const int16_t* input_samples = reinterpret_cast<const int16_t*>(input_data);
+    const uint64_t phase_step = (static_cast<uint64_t>(input_rate) << 32) / target_rate;
+    uint64_t output_frame = 0;
+    esp_err_t ret = ESP_OK;
+
+    while (output_frame < output_frames) {
+        if (check_stop_signal) {
+            uint32_t notification_value = 0;
+            if (xTaskNotifyWait(0, 0, &notification_value, 0) == pdTRUE) {
+                ESP_LOGI(TAG, "Received stop signal during streaming conversion, stopping gracefully...");
+                ret = ESP_ERR_INVALID_STATE;
+                break;
+            }
+        }
+
+        const uint64_t frames_remaining = output_frames - output_frame;
+        const size_t frames_this_chunk = static_cast<size_t>(
+            frames_remaining < kOutputFramesPerChunk ? frames_remaining : kOutputFramesPerChunk);
+
+        if (target_type == AUDIO_TYPE_INT32) {
+            int32_t* out = reinterpret_cast<int32_t*>(chunk);
+            for (size_t i = 0; i < frames_this_chunk; ++i) {
+                const uint64_t phase = (output_frame + i) * phase_step;
+                size_t frame0 = static_cast<size_t>(phase >> 32);
+                if (frame0 >= input_frames) {
+                    frame0 = input_frames - 1;
+                }
+                const size_t frame1 = (frame0 + 1 < input_frames) ? (frame0 + 1) : frame0;
+                const uint32_t frac = static_cast<uint32_t>(phase & 0xffffffffu);
+
+                for (uint32_t ch = 0; ch < target_channels; ++ch) {
+                    const int32_t sample = interpolate_i16_sample(input_samples, frame0, frame1, frac,
+                                                                  input_channels, target_channels, ch);
+                    out[i * target_channels + ch] = static_cast<int32_t>(static_cast<int64_t>(sample) * 65536);
+                }
+            }
+        } else {
+            int16_t* out = reinterpret_cast<int16_t*>(chunk);
+            for (size_t i = 0; i < frames_this_chunk; ++i) {
+                const uint64_t phase = (output_frame + i) * phase_step;
+                size_t frame0 = static_cast<size_t>(phase >> 32);
+                if (frame0 >= input_frames) {
+                    frame0 = input_frames - 1;
+                }
+                const size_t frame1 = (frame0 + 1 < input_frames) ? (frame0 + 1) : frame0;
+                const uint32_t frac = static_cast<uint32_t>(phase & 0xffffffffu);
+
+                for (uint32_t ch = 0; ch < target_channels; ++ch) {
+                    const int32_t sample = interpolate_i16_sample(input_samples, frame0, frame1, frac,
+                                                                  input_channels, target_channels, ch);
+                    out[i * target_channels + ch] = static_cast<int16_t>(sample);
+                }
+            }
+        }
+
+        const size_t bytes_this_chunk = frames_this_chunk * target_frame_size;
+        ret = esp_codec_dev_write(play_dev, chunk, bytes_this_chunk);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to write converted audio chunk at frame %llu: %s",
+                     static_cast<unsigned long long>(output_frame), esp_err_to_name(ret));
+            break;
+        }
+
+        bytes_written_out += bytes_this_chunk;
+        output_frame += frames_this_chunk;
+        set_progress_elapsed(progress_elapsed_ms, frames_to_ms(output_frame, target_rate), duration_ms);
+    }
+
+    heap_caps_free(chunk);
+    return ret;
+}
 
 static const AudioFileMetadata* find_audio_metadata(audio_file_type_t type) {
     for (size_t i = 0; i < AUDIO_FILE_COUNT; ++i) {
@@ -266,6 +499,10 @@ esp_err_t audio_playback::play_audio_file_impl(audio_file_type_t audio_type, boo
         return ESP_ERR_INVALID_STATE;
     }
 
+    playback_progress_valid_ = false;
+    playback_elapsed_ms_ = 0;
+    playback_duration_ms_ = 0;
+
     if (!is_audio_file_available(audio_type)) {
         ESP_LOGE(TAG, "Audio file %s is not available", get_audio_file_name(audio_type));
         return ESP_ERR_NOT_FOUND;
@@ -294,6 +531,62 @@ esp_err_t audio_playback::play_audio_file_impl(audio_file_type_t audio_type, boo
     const uint32_t system_sample_rate_hz = static_cast<uint32_t>(parent_->sample_rate);
     const uint32_t system_bits = static_cast<uint32_t>(parent_->bits_per_sample);
     const uint32_t system_channels = static_cast<uint32_t>(parent_->tx_channels);
+    const audio_data_type_t file_type = bits_to_audio_data_type(static_cast<uint32_t>(file_bits));
+    const audio_data_type_t system_type = bits_to_audio_data_type(system_bits);
+    const bool need_conversion = (file_sample_rate_hz != system_sample_rate_hz) ||
+                                 (static_cast<uint32_t>(file_channels) != system_channels) ||
+                                 (static_cast<uint32_t>(file_bits) != system_bits);
+
+    if (need_conversion && can_stream_convert_i16(file_type, system_type,
+                                                  static_cast<uint32_t>(file_channels),
+                                                  system_channels)) {
+        ESP_LOGI(TAG, "Streaming audio format conversion: %u Hz, %u bit, %u ch -> %u Hz, %u bit, %u ch",
+                 static_cast<unsigned>(file_sample_rate_hz),
+                 static_cast<unsigned>(file_bits),
+                 static_cast<unsigned>(file_channels),
+                 static_cast<unsigned>(system_sample_rate_hz),
+                 static_cast<unsigned>(system_bits),
+                 static_cast<unsigned>(system_channels));
+
+        size_t bytes_written = 0;
+        size_t bytes_to_play = 0;
+        playback_progress_valid_ = true;
+        ret = write_stream_converted_i16(parent_->play_dev,
+                                         pcm_start, pcm_len,
+                                         file_sample_rate_hz,
+                                         static_cast<uint32_t>(file_channels),
+                                         system_sample_rate_hz,
+                                         system_channels,
+                                         system_type,
+                                         check_stop_signal,
+                                         duration_limit_seconds,
+                                         &playback_elapsed_ms_,
+                                         &playback_duration_ms_,
+                                         bytes_written,
+                                         bytes_to_play);
+
+        if (ret == ESP_ERR_INVALID_STATE) {
+            ESP_LOGI(TAG, "Playback interrupted by stop signal at %zu/%zu bytes", bytes_written, bytes_to_play);
+            float saved_volume = parent_->volume;
+            parent_->set_volume(0.0);
+            vTaskDelay(pdMS_TO_TICKS(20));
+            clear_audio_pipeline(150);
+            parent_->set_volume(saved_volume);
+            return ret;
+        }
+
+        if (ret != ESP_OK) {
+            return ret;
+        }
+
+        ESP_LOGI(TAG, "Audio playback completed successfully (%zu bytes)", bytes_written);
+        float saved_volume = parent_->volume;
+        parent_->set_volume(10.0);
+        vTaskDelay(pdMS_TO_TICKS(20));
+        clear_audio_pipeline(200);
+        parent_->set_volume(saved_volume);
+        return ESP_OK;
+    }
 
     uint8_t* converted_buffer = nullptr;
     size_t converted_size = 0;
@@ -301,9 +594,9 @@ esp_err_t audio_playback::play_audio_file_impl(audio_file_type_t audio_type, boo
     ret = remix_convert_pcm_to_format(pcm_start, pcm_len,
                                       file_sample_rate_hz,
                                       static_cast<uint32_t>(file_channels),
-                                      bits_to_audio_data_type(static_cast<uint32_t>(file_bits)),
+                                      file_type,
                                       system_sample_rate_hz, system_channels,
-                                      bits_to_audio_data_type(system_bits),
+                                      system_type,
                                       &converted_buffer, &converted_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to convert audio format: %s", esp_err_to_name(ret));
@@ -342,6 +635,14 @@ esp_err_t audio_playback::play_audio_file_impl(audio_file_type_t audio_type, boo
         }
     }
 
+    const uint32_t playback_duration_ms = bytes_to_ms(bytes_to_play,
+                                                      system_sample_rate_hz,
+                                                      system_channels,
+                                                      system_type);
+    playback_duration_ms_ = playback_duration_ms;
+    playback_elapsed_ms_ = 0;
+    playback_progress_valid_ = playback_duration_ms > 0;
+
     const size_t CHUNK_SIZE = 4096;
     size_t bytes_written = 0;
     ret = ESP_OK;
@@ -367,6 +668,10 @@ esp_err_t audio_playback::play_audio_file_impl(audio_file_type_t audio_type, boo
         }
 
         bytes_written += to_write;
+        set_progress_elapsed(&playback_elapsed_ms_,
+                             bytes_to_ms(bytes_written, system_sample_rate_hz,
+                                         system_channels, system_type),
+                             playback_duration_ms_);
     }
 
     if (ret == ESP_ERR_INVALID_STATE) {
@@ -415,6 +720,10 @@ esp_err_t audio_playback::play_audio_buffer_impl(const uint8_t* buffer, size_t b
         return ESP_ERR_INVALID_STATE;
     }
 
+    playback_progress_valid_ = false;
+    playback_elapsed_ms_ = 0;
+    playback_duration_ms_ = 0;
+
     if (duration_limit_seconds > 0.0f) {
         ESP_LOGI(TAG, "Playing audio buffer (%zu bytes, %u Hz, %u ch, %u bit) - limited to %.1f seconds",
                  buffer_size, static_cast<unsigned>(buffer_sample_rate_hz),
@@ -431,6 +740,8 @@ esp_err_t audio_playback::play_audio_buffer_impl(const uint8_t* buffer, size_t b
     const uint32_t system_sample_rate_hz = static_cast<uint32_t>(parent_->sample_rate);
     const uint32_t system_bits = static_cast<uint32_t>(parent_->bits_per_sample);
     const uint32_t system_channels = static_cast<uint32_t>(parent_->tx_channels);
+    const audio_data_type_t buffer_type = bits_to_audio_data_type(static_cast<uint32_t>(buffer_bits));
+    const audio_data_type_t system_type = bits_to_audio_data_type(system_bits);
 
     uint8_t* converted_buffer = nullptr;
     size_t converted_size = 0;
@@ -442,12 +753,12 @@ esp_err_t audio_playback::play_audio_buffer_impl(const uint8_t* buffer, size_t b
 
     if (need_conversion) {
         ret = remix_convert_pcm_to_format(buffer, buffer_size,
-                                          buffer_sample_rate_hz,
-                                          static_cast<uint32_t>(buffer_channels),
-                                          bits_to_audio_data_type(static_cast<uint32_t>(buffer_bits)),
-                                          system_sample_rate_hz, system_channels,
-                                          bits_to_audio_data_type(system_bits),
-                                          &converted_buffer, &converted_size);
+                                           buffer_sample_rate_hz,
+                                           static_cast<uint32_t>(buffer_channels),
+                                           buffer_type,
+                                           system_sample_rate_hz, system_channels,
+                                           system_type,
+                                           &converted_buffer, &converted_size);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to convert audio format: %s", esp_err_to_name(ret));
             return ret;
@@ -479,6 +790,14 @@ esp_err_t audio_playback::play_audio_buffer_impl(const uint8_t* buffer, size_t b
         }
     }
 
+    const uint32_t playback_duration_ms = bytes_to_ms(bytes_to_play,
+                                                      system_sample_rate_hz,
+                                                      system_channels,
+                                                      system_type);
+    playback_duration_ms_ = playback_duration_ms;
+    playback_elapsed_ms_ = 0;
+    playback_progress_valid_ = playback_duration_ms > 0;
+
     const size_t CHUNK_SIZE = 4096;
     size_t bytes_written = 0;
     ret = ESP_OK;
@@ -504,6 +823,10 @@ esp_err_t audio_playback::play_audio_buffer_impl(const uint8_t* buffer, size_t b
         }
 
         bytes_written += to_write;
+        set_progress_elapsed(&playback_elapsed_ms_,
+                             bytes_to_ms(bytes_written, system_sample_rate_hz,
+                                         system_channels, system_type),
+                             playback_duration_ms_);
     }
 
     if (ret == ESP_ERR_INVALID_STATE) {
@@ -531,6 +854,22 @@ esp_err_t audio_playback::play_audio_buffer_impl(const uint8_t* buffer, size_t b
 // ============================================================================
 // Public 播放方法
 // ============================================================================
+
+bool audio_playback::get_playback_progress(uint32_t& elapsed_ms, uint32_t& duration_ms) const
+{
+    if (!playback_progress_valid_ || playback_duration_ms_ == 0) {
+        elapsed_ms = 0;
+        duration_ms = 0;
+        return false;
+    }
+
+    duration_ms = playback_duration_ms_;
+    elapsed_ms = playback_elapsed_ms_;
+    if (elapsed_ms > duration_ms) {
+        elapsed_ms = duration_ms;
+    }
+    return true;
+}
 
 esp_err_t audio_playback::play_audio_file(audio_file_type_t audio_type, audio_playback_mode_t mode, float duration_limit_seconds)
 {

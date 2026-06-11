@@ -51,7 +51,7 @@ if(DEFINED AUDIO_FILE_CONFIGS AND DEFINED AUDIO_PLAYBACK_DIR)
         list(GET config_list 6 description)
 
         # 创建 CMake option（统一命名：ENABLE_${audio_id}）
-        option(ENABLE_${audio_id} "Enable embedding ${description}" ${default_val})
+        set(ENABLE_${audio_id} ${default_val} CACHE BOOL "Enable embedding ${description}" FORCE)
 
         if(ENABLE_${audio_id})
             list(APPEND EMBED_FILE_LIST "${AUDIO_PLAYBACK_DIR}/${filename}")

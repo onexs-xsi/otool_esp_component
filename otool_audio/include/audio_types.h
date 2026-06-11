@@ -58,13 +58,13 @@ typedef enum {
  * 定义可播放的音频文件类型
  */
 typedef enum {
-    AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S = 0,  ///< candy_wind 1通道 16000Hz 16bit 9.0秒
-    AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S,     ///< candy_wind 1通道 44100Hz 16bit 45.0秒
-    AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S,     ///< candy_wind 2通道 16000Hz 16bit 9.0秒
-    AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S,     ///< candy_wind 2通道 44100Hz 16bit 45.0秒
-    AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S,     ///< sine_440Hz 2通道 16000Hz 16bit 10.0秒
-    AUDIO_FILE_STARTUP_1CH_16K_16B_4S,     ///< startup 1通道 16000Hz 16bit 4.0秒
-    AUDIO_FILE_STARTUP_2CH_16K_16B_4S,     ///< startup 2通道 16000Hz 16bit 4.0秒
+    AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S = 0,  ///< candy_wind 1通道 16000Hz 16bit 9.0秒 (candy_wind_pcm_1ch_16k_16bit_9s.pcm)
+    AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S,     ///< candy_wind 1通道 44100Hz 16bit 45.0秒 (candy_wind_pcm_1ch_44.1k_16bit_45s.pcm)
+    AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S,     ///< candy_wind 2通道 16000Hz 16bit 9.0秒 (candy_wind_pcm_2ch_16k_16bit_9s.pcm)
+    AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S,     ///< candy_wind 2通道 44100Hz 16bit 45.0秒 (candy_wind_pcm_2ch_44.1k_16bit_45s.pcm)
+    AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S,     ///< sine_440Hz 2通道 16000Hz 16bit 10.0秒 (sine_440Hz_pcm_2ch_16k_16bit_10s.pcm)
+    AUDIO_FILE_STARTUP_1CH_16K_16B_4S,     ///< startup 1通道 16000Hz 16bit 4.0秒 (startup_pcm_1ch_16k_16bit_4s.pcm)
+    AUDIO_FILE_STARTUP_2CH_16K_16B_4S,     ///< startup 2通道 16000Hz 16bit 4.0秒 (startup_pcm_2ch_16k_16bit_4s.pcm)
     AUDIO_FILE_MAX                             ///< 枚举最大值（用于边界检查）
 } audio_file_type_t;
 
