@@ -236,11 +236,16 @@ void ir_tools::subscribe(ir_format_t format, ir_decode_callback_t callback) {
     }
     
     size_t old_count = ir_decoder_get_subscribed_count(decoder_ctx_);
+    ir_format_t old_first = ir_decoder_get_first_subscribed_format(decoder_ctx_);
     ir_decoder_subscribe(decoder_ctx_, format, std::move(callback));
     size_t new_count = ir_decoder_get_subscribed_count(decoder_ctx_);
+    ir_format_t new_first = ir_decoder_get_first_subscribed_format(decoder_ctx_);
+    bool subscription_config_changed =
+        old_count != new_count ||
+        (old_count == 1 && new_count == 1 && old_first != new_first);
     
     // 如果RX通道已初始化，根据订阅数量重新配置载波
-    if (rx_channel_) {
+    if (rx_channel_ && subscription_config_changed) {
         reconfigure_rx_carrier();
         
         // 如果订阅数跨越阈值(1→2或2→1)，需要重启RX任务以应用新的signal_range_min_ns
@@ -256,11 +261,16 @@ void ir_tools::subscribe(ir_format_t format, ir_decode_callback_t callback) {
 void ir_tools::unsubscribe(ir_format_t format) {
     if (decoder_ctx_) {
         size_t old_count = ir_decoder_get_subscribed_count(decoder_ctx_);
+        ir_format_t old_first = ir_decoder_get_first_subscribed_format(decoder_ctx_);
         ir_decoder_unsubscribe(decoder_ctx_, format);
         size_t new_count = ir_decoder_get_subscribed_count(decoder_ctx_);
+        ir_format_t new_first = ir_decoder_get_first_subscribed_format(decoder_ctx_);
+        bool subscription_config_changed =
+            old_count != new_count ||
+            (old_count == 1 && new_count == 1 && old_first != new_first);
         
         // 如果RX通道已初始化，根据订阅数量重新配置载波
-        if (rx_channel_) {
+        if (rx_channel_ && subscription_config_changed) {
             reconfigure_rx_carrier();
             
             // 如果订阅数跨越阈值(2→1或1→0)，需要重启RX任务以应用新的signal_range_min_ns
