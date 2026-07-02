@@ -86,14 +86,12 @@ esp_err_t bmi270_tools::init(i2c_bus_handle_t bus, i2c_bus_device_handle_t *i2c_
     esp_err_t id_ret = i2c_bus_read_byte(_dev, BMI2_CHIP_ID_ADDR, &raw_chip_id);
     if (id_ret != ESP_OK) {
         ESP_LOGE(TAG, "Pre-read CHIP_ID failed (i2c err=%s)", esp_err_to_name(id_ret));
-        if (_owns_dev) deinit();
+        deinit();
         return id_ret;
     }
     ESP_LOGI(TAG, "BMI270 pre-read CHIP_ID=0x%02X (expected 0x%02X)", raw_chip_id, BMI270_CHIP_ID);
     if (raw_chip_id != BMI270_CHIP_ID) {
-        ESP_LOGE(TAG, "Unexpected CHIP_ID 0x%02X, abort init", raw_chip_id);
-        if (_owns_dev) deinit();
-        return ESP_ERR_NOT_FOUND;
+        ESP_LOGW(TAG, "Unexpected CHIP_ID 0x%02X, continue with Bosch SensorAPI init", raw_chip_id);
     }
     _bmi270_dev.chip_id = raw_chip_id;
 
@@ -118,7 +116,7 @@ esp_err_t bmi270_tools::init(i2c_bus_handle_t bus, i2c_bus_device_handle_t *i2c_
         case MODE_MAXIMUM_FIFO:
         default:
             ESP_LOGE(TAG, "Unsupported BMI270 mode: %d", _current_mode);
-            if (_owns_dev) deinit();
+            deinit();
             return ESP_ERR_NOT_SUPPORTED;
     }
     
@@ -126,7 +124,7 @@ esp_err_t bmi270_tools::init(i2c_bus_handle_t bus, i2c_bus_device_handle_t *i2c_
         ESP_LOGE(TAG, "BMI270 %s initialization failed", mode_name);
         print_bmi2_api_error(rslt);
         _initialized = false; // 重置初始化标志
-        if (_owns_dev) deinit();
+        deinit();
         return ESP_FAIL;
     }
 
