@@ -125,6 +125,13 @@ public:
      */
     const char* get_audio_file_name(audio_file_type_t audio_type) const;
 
+    esp_err_t get_audio_file_pcm(audio_file_type_t audio_type,
+                                 const uint8_t*& pcm_start,
+                                 size_t& pcm_len,
+                                 uint32_t& file_sample_rate_hz,
+                                 audio_channels_t& file_channels,
+                                 i2s_data_bit_width_t& file_bits);
+
     /**
      * @brief 检查指定音频文件是否可用
      */

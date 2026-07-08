@@ -46,6 +46,15 @@ typedef struct {
     double clipped_percent;                    ///< 剪裁占比 (%)
 } mic_channel_quality_t;
 
+#define AUDIO_MIC_SAMPLE_WINDOW_MAX_SAMPLES 1024
+
+typedef struct {
+    uint32_t sample_rate_hz;
+    size_t sample_count;
+    bool available[4];
+    int16_t samples[4][AUDIO_MIC_SAMPLE_WINDOW_MAX_SAMPLES];
+} mic_channel_sample_window_t;
+
 /**
  * @brief 录音流式会话配置
  */
@@ -141,6 +150,12 @@ public:
      */
     static void compute_split_channel_quality(const channel_split_result_t& split_result,
                                               mic_channel_quality_t quality[4]);
+
+    esp_err_t sample_mic_channels(uint32_t duration_ms,
+                                  mic_channel_quality_t quality[4],
+                                  size_t* bytes_read_out = nullptr,
+                                  esp_codec_dev_sample_info_t* sample_info_out = nullptr,
+                                  mic_channel_sample_window_t* sample_window_out = nullptr);
 
     // ===== 废弃测试函数 (代码保留，标注 deprecated) =====
 

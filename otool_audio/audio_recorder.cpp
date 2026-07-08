@@ -444,6 +444,158 @@ void audio_recorder::compute_split_channel_quality(const channel_split_result_t&
 // 流式录音会话 (TASK-1 stubs)
 // ============================================================================
 
+esp_err_t audio_recorder::sample_mic_channels(uint32_t duration_ms,
+                                               mic_channel_quality_t quality[4],
+                                               size_t* bytes_read_out,
+                                               esp_codec_dev_sample_info_t* sample_info_out,
+                                               mic_channel_sample_window_t* sample_window_out)
+{
+    if (!quality) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(quality, 0, sizeof(mic_channel_quality_t) * 4);
+    for (int i = 0; i < 4; ++i) {
+        quality[i].rms_db = -96.0;
+    }
+    if (bytes_read_out) {
+        *bytes_read_out = 0;
+    }
+    if (sample_info_out) {
+        *sample_info_out = {};
+    }
+    if (sample_window_out) {
+        memset(sample_window_out, 0, sizeof(*sample_window_out));
+    }
+
+    if (parent_->sr_afe_ && parent_->sr_afe_->aec_session_is_running()) {
+        ESP_LOGE(TAG, "Cannot sample microphones while AEC streaming session is active");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!parent_->es7210_initialized || !parent_->record_dev) {
+        ESP_LOGE(TAG, "ES7210 record path not ready");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (duration_ms == 0) {
+        duration_ms = 100;
+    }
+
+    esp_codec_dev_sample_info_t fs = {};
+    fs.sample_rate = static_cast<uint32_t>(parent_->sample_rate);
+    fs.bits_per_sample = static_cast<uint32_t>(parent_->bits_per_sample);
+    const bool is_tdm_mode = parent_->es7210_use_tdm;
+    fs.channel = is_tdm_mode
+                     ? 2
+                     : static_cast<uint32_t>((parent_->rx_channels == AUDIO_CHANNELS_MONO) ? 1 : 2);
+    if (fs.sample_rate == 0 || fs.bits_per_sample == 0 || fs.channel == 0) {
+        ESP_LOGE(TAG, "Invalid sample format for mic sampling: sr=%u bits=%u ch=%u",
+                 static_cast<unsigned>(fs.sample_rate),
+                 static_cast<unsigned>(fs.bits_per_sample),
+                 static_cast<unsigned>(fs.channel));
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const size_t bytes_per_sample = fs.bits_per_sample >> 3;
+    const size_t frame_size = bytes_per_sample * fs.channel;
+    if (bytes_per_sample == 0 || frame_size == 0) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    uint64_t target_bytes_64 = static_cast<uint64_t>(fs.sample_rate) *
+                               static_cast<uint64_t>(frame_size) *
+                               static_cast<uint64_t>(duration_ms) / 1000ULL;
+    if (target_bytes_64 < frame_size) {
+        target_bytes_64 = frame_size;
+    }
+    target_bytes_64 = (target_bytes_64 / frame_size) * frame_size;
+    if (target_bytes_64 == 0 || target_bytes_64 > SIZE_MAX) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    const size_t target_bytes = static_cast<size_t>(target_bytes_64);
+    uint8_t* record_buffer = static_cast<uint8_t*>(malloc(target_bytes));
+    if (!record_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate mic sample buffer: %zu bytes", target_bytes);
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t bytes_read = 0;
+    esp_err_t read_ret = ESP_OK;
+    const size_t block_size = 512;
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(duration_ms + 300);
+    const TickType_t start_tick = xTaskGetTickCount();
+    while (bytes_read < target_bytes) {
+        const size_t remaining = target_bytes - bytes_read;
+        size_t to_read = remaining > block_size ? block_size : remaining;
+        to_read = (to_read / frame_size) * frame_size;
+        if (to_read == 0) {
+            to_read = frame_size;
+        }
+        read_ret = esp_codec_dev_read(parent_->record_dev,
+                                      record_buffer + bytes_read,
+                                      static_cast<int>(to_read));
+        if (read_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Mic sample read failed at %zu/%zu: %s",
+                     bytes_read,
+                     target_bytes,
+                     esp_err_to_name(read_ret));
+            break;
+        }
+        bytes_read += to_read;
+        if ((xTaskGetTickCount() - start_tick) > timeout_ticks) {
+            ESP_LOGW(TAG, "Mic sample timeout at %zu/%zu bytes", bytes_read, target_bytes);
+            break;
+        }
+    }
+
+    if (bytes_read_out) {
+        *bytes_read_out = bytes_read;
+    }
+    if (sample_info_out) {
+        *sample_info_out = fs;
+    }
+
+    if (read_ret != ESP_OK && bytes_read == 0) {
+        free(record_buffer);
+        return read_ret;
+    }
+    if (bytes_read == 0) {
+        free(record_buffer);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    channel_split_result_t split_result = split_recorded_channels(record_buffer,
+                                                                  bytes_read,
+                                                                  fs,
+                                                                  is_tdm_mode,
+                                                                  parent_->mic_channels);
+    free(record_buffer);
+    if (split_result.status != ESP_OK) {
+        ESP_LOGE(TAG, "Mic sample channel split failed: %s", esp_err_to_name(split_result.status));
+        free_channel_split_result(split_result);
+        return split_result.status;
+    }
+
+    compute_split_channel_quality(split_result, quality);
+    if (sample_window_out) {
+        sample_window_out->sample_rate_hz = fs.sample_rate;
+        const size_t sample_count = split_result.samples_per_channel > AUDIO_MIC_SAMPLE_WINDOW_MAX_SAMPLES
+                                        ? AUDIO_MIC_SAMPLE_WINDOW_MAX_SAMPLES
+                                        : split_result.samples_per_channel;
+        sample_window_out->sample_count = sample_count;
+        for (int ch = 0; ch < 4; ++ch) {
+            sample_window_out->available[ch] = split_result.mic_buffers[ch] != nullptr && sample_count > 0;
+            if (sample_window_out->available[ch]) {
+                memcpy(sample_window_out->samples[ch],
+                       split_result.mic_buffers[ch],
+                       sample_count * sizeof(int16_t));
+            }
+        }
+    }
+    free_channel_split_result(split_result);
+    return ESP_OK;
+}
+
 esp_err_t audio_recorder::record_session_start(const record_session_config_t& config)
 {
     // TODO: TASK-1 实现
