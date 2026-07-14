@@ -27,6 +27,15 @@
 
 static const char *TAG = "audio_tools";
 
+// I2S DMA buffers must live in internal DMA-capable RAM on ESP32-P4. Keep the
+// ring deliberately bounded so audio can be recreated after Factory P1
+// restores the shared SYS I2C/M5BUS resources. Preserve the original 256-frame
+// cadence used by simultaneous P5 playback/capture, while reducing the ring
+// from six to three descriptors (6 KiB per direction instead of 12 KiB at
+// 16 kHz, stereo, 32-bit).
+static constexpr uint32_t AUDIO_I2S_DMA_DESC_NUM = 3;
+static constexpr uint32_t AUDIO_I2S_DMA_FRAME_NUM = 256;
+
 // PCM extern declarations, AudioDataGetter functions, AUDIO_FILE_TABLE,
 // find_audio_metadata, load_int16_le, load_uint32_le -> moved to audio_playback.cpp / audio_recorder.cpp
 // free_channel_split_result, split_recorded_channels, compute_split_channel_quality,
@@ -231,7 +240,8 @@ esp_err_t audio_tools::i2s_channel_init()
     
     // 1. 创建 I2S 通道（同时创建TX和RX）
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(i2s_port_num, I2S_ROLE_MASTER);
-    chan_cfg.dma_frame_num = 256;
+    chan_cfg.dma_desc_num = AUDIO_I2S_DMA_DESC_NUM;
+    chan_cfg.dma_frame_num = AUDIO_I2S_DMA_FRAME_NUM;
     ret = i2s_new_channel(&chan_cfg, &tx_handle, &rx_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create I2S channels: %s", esp_err_to_name(ret));

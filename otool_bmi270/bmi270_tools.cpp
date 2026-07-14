@@ -461,6 +461,8 @@ bool bmi270_tools::check_interrupt_status()
 
     // 检查任意运动检测中断
     if (int_status & BMI270_ANY_MOT_STATUS_MASK) {
+        // This bit can remain asserted while the board is moving. Avoid
+        // flooding the shared serial transport and starving live UI updates.
         ESP_LOGI(TAG, "Any motion detected");
         interrupt_detected = true;
     }
@@ -1651,6 +1653,21 @@ int bmi270_tools::configure_magnetometer() {
     else{
         ESP_LOGI(TAG, "BMM150 preset mode set to REGULAR");
     }
+
+    // REGULAR preset resets the BMM150 itself to 10 Hz even though BMI270 AUX
+    // is configured for 50 Hz. Use a real 20 Hz conversion rate so Factory P4
+    // receives fresh magnetic samples at each 50 ms monitor cycle.
+    _bmm150_mag_settings.data_rate = BMM150_DATA_RATE_20HZ;
+    rslt = bmm150_set_sensor_settings(BMM150_SEL_DATA_RATE,
+                                      &_bmm150_mag_settings,
+                                      &_bmm150_dev);
+    if (rslt != BMM150_OK) {
+        ESP_LOGE(TAG, "Failed to set BMM150 data rate to 20 Hz: %d", rslt);
+        print_bmm150_api_error(rslt);
+        free(config);
+        return rslt;
+    }
+    ESP_LOGI(TAG, "BMM150 data rate set to 20 Hz");
 
     // 配置BMM150 op_mode 参数
     _bmm150_mag_settings.pwr_mode = BMM150_POWERMODE_NORMAL;
