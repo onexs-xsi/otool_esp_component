@@ -167,7 +167,7 @@ private:
 
     // 内部辅助函数
     esp_err_t ensure_i2s_channel();         ///< 确保已创建 I2S 通道
-    void try_release_i2s();                 ///< 在引用计数为 0 时释放 I2S 通道
+    esp_err_t try_release_i2s();            ///< 在引用计数为 0 时释放 I2S 通道
     void incr_i2s_user();                   ///< 增加 I2S 使用者计数
     void decr_i2s_user();                   ///< 减少 I2S 使用者计数
     static void delayed_pa_enable_task_entry(void *arg);

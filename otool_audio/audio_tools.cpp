@@ -27,14 +27,24 @@
 
 static const char *TAG = "audio_tools";
 
-// I2S DMA buffers must live in internal DMA-capable RAM on ESP32-P4. Keep the
-// ring deliberately bounded so audio can be recreated after Factory P1
-// restores the shared SYS I2C/M5BUS resources. Preserve the original 256-frame
-// cadence used by simultaneous P5 playback/capture, while reducing the ring
-// from six to three descriptors (6 KiB per direction instead of 12 KiB at
-// 16 kHz, stereo, 32-bit).
-static constexpr uint32_t AUDIO_I2S_DMA_DESC_NUM = 3;
+// I2S DMA buffers must live in internal DMA-capable RAM on ESP32-P4. The REC
+// spectrum tables and Factory report/state buffers now live in PSRAM, so
+// restore the original six-descriptor ring for playback/capture jitter margin
+// (12 KiB per direction at 16 kHz, stereo, 32-bit).
+static constexpr uint32_t AUDIO_I2S_DMA_DESC_NUM = 6;
 static constexpr uint32_t AUDIO_I2S_DMA_FRAME_NUM = 256;
+static constexpr uint32_t AUDIO_I2S_DMA_CAPS =
+    MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT;
+
+static void log_i2s_dma_heap(const char* stage)
+{
+    ESP_LOGI(TAG,
+             "I2S DMA heap: stage=%s free=%u largest=%u minimum=%u",
+             stage ? stage : "unknown",
+             static_cast<unsigned>(heap_caps_get_free_size(AUDIO_I2S_DMA_CAPS)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(AUDIO_I2S_DMA_CAPS)),
+             static_cast<unsigned>(heap_caps_get_minimum_free_size(AUDIO_I2S_DMA_CAPS)));
+}
 
 // PCM extern declarations, AudioDataGetter functions, AUDIO_FILE_TABLE,
 // find_audio_metadata, load_int16_le, load_uint32_le -> moved to audio_playback.cpp / audio_recorder.cpp
@@ -207,21 +217,25 @@ void audio_tools::decr_i2s_user()
         i2s_user_count--;
         ESP_LOGD(TAG, "I2S user -- => %d", i2s_user_count);
     }
-    try_release_i2s();
+    const esp_err_t ret = try_release_i2s();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Automatic I2S release failed: %s", esp_err_to_name(ret));
+    }
 }
 
-void audio_tools::try_release_i2s()
+esp_err_t audio_tools::try_release_i2s()
 {
     if (suppress_release) {
         ESP_LOGD(TAG, "Suppressing I2S release (system deinit in progress)");
-        return;
+        return ESP_OK;
     }
     if (i2s_user_count == 0) {
         ESP_LOGI(TAG, "No codec uses I2S anymore, releasing channels");
         if (tx_configured) { i2s_tx_deinit(); tx_configured = false; }
         if (rx_configured) { i2s_rx_deinit(); rx_configured = false; }
-        i2s_channel_deinit();
+        return i2s_channel_deinit();
     }
+    return ESP_OK;
 }
 
 esp_err_t audio_tools::i2s_channel_init()
@@ -239,6 +253,7 @@ esp_err_t audio_tools::i2s_channel_init()
     esp_err_t ret = ESP_OK;
     
     // 1. 创建 I2S 通道（同时创建TX和RX）
+    log_i2s_dma_heap("channel_init_before");
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(i2s_port_num, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = AUDIO_I2S_DMA_DESC_NUM;
     chan_cfg.dma_frame_num = AUDIO_I2S_DMA_FRAME_NUM;
@@ -249,6 +264,7 @@ esp_err_t audio_tools::i2s_channel_init()
     }
     
     ESP_LOGI(TAG, "I2S channels created successfully (channel config will be set individually)");
+    log_i2s_dma_heap("channel_init_after");
     return ESP_OK;
 }
 
@@ -260,36 +276,61 @@ esp_err_t audio_tools::i2s_channel_deinit()
     }
 
     ESP_LOGI(TAG, "Deinitializing I2S channels...");
+    log_i2s_dma_heap("channel_deinit_before");
+    esp_err_t first_error = ESP_OK;
     
     // 禁用并删除通道
     if (tx_handle) {
         if (tx_configured) {
-            esp_err_t ret = i2s_channel_disable(tx_handle);
+            const esp_err_t ret = i2s_channel_disable(tx_handle);
             if (ret != ESP_OK) {
                 if (ret == ESP_ERR_INVALID_STATE) {
                     ESP_LOGD(TAG, "I2S TX channel was already disabled");
+                    tx_configured = false;
                 } else {
                     ESP_LOGW(TAG, "Failed to disable I2S TX channel: %s", esp_err_to_name(ret));
                 }
+            } else {
+                tx_configured = false;
             }
         }
-        i2s_del_channel(tx_handle);
-        tx_handle = NULL;
+        const esp_err_t ret = i2s_del_channel(tx_handle);
+        if (ret == ESP_OK) {
+            tx_handle = nullptr;
+            tx_configured = false;
+        } else {
+            ESP_LOGE(TAG,
+                     "Failed to delete I2S TX channel; handle retained for retry: %s",
+                     esp_err_to_name(ret));
+            if (first_error == ESP_OK) first_error = ret;
+        }
     }
     
     if (rx_handle) {
         if (rx_configured) {
-            esp_err_t ret = i2s_channel_disable(rx_handle);
+            const esp_err_t ret = i2s_channel_disable(rx_handle);
             if (ret != ESP_OK) {
                 if (ret == ESP_ERR_INVALID_STATE) {
                     ESP_LOGD(TAG, "I2S RX channel was already disabled");
+                    rx_configured = false;
                 } else {
                     ESP_LOGW(TAG, "Failed to disable I2S RX channel: %s", esp_err_to_name(ret));
                 }
+            } else {
+                rx_configured = false;
             }
         }
-        i2s_del_channel(rx_handle);
-        rx_handle = NULL;
+        const esp_err_t ret = i2s_del_channel(rx_handle);
+        if (ret == ESP_OK) {
+            rx_handle = nullptr;
+            rx_configured = false;
+            rx_tdm_slot_count = 0;
+        } else {
+            ESP_LOGE(TAG,
+                     "Failed to delete I2S RX channel; handle retained for retry: %s",
+                     esp_err_to_name(ret));
+            if (first_error == ESP_OK) first_error = ret;
+        }
     }
     
     // 释放 I2S 通道后，将相关引脚全部置为高阻态，避免继续驱动总线
@@ -302,6 +343,15 @@ esp_err_t audio_tools::i2s_channel_deinit()
     ESP_LOGI(TAG, "I2S GPIOs set to high-Z (MCK:%d, BCK:%d, WS:%d, DOUT:%d, DIN:%d PA:%d)",
              i2s_mck_pin, i2s_bck_pin, i2s_ws_pin, i2s_data_out_pin, i2s_data_in_pin, pa_pin);
     
+    log_i2s_dma_heap("channel_deinit_after");
+    if (first_error != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "I2S channel deinit incomplete: tx=%p rx=%p error=%s",
+                 tx_handle,
+                 rx_handle,
+                 esp_err_to_name(first_error));
+        return first_error;
+    }
     ESP_LOGI(TAG, "I2S channels deinitialized successfully");
     return ESP_OK;
 }
@@ -628,7 +678,15 @@ esp_err_t audio_tools::audio_system_deinit(bool for_deep_sleep)
     } else {
         // 常规释放路径
         suppress_release = false;
-        try_release_i2s();
+        const esp_err_t release_ret = try_release_i2s();
+        if (release_ret != ESP_OK) {
+            system_initialized = false;
+            if (audio_mutex) xSemaphoreGive(audio_mutex);
+            ESP_LOGE(TAG,
+                     "Audio system deinit failed while releasing I2S: %s",
+                     esp_err_to_name(release_ret));
+            return release_ret;
+        }
     }
 
     system_initialized = false;

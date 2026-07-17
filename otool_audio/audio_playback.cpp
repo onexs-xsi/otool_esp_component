@@ -162,7 +162,12 @@ static bool can_stream_convert_i16(audio_data_type_t input_type,
 
 static uint8_t* alloc_playback_chunk(size_t bytes)
 {
-    uint8_t* buffer = static_cast<uint8_t*>(heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    uint8_t* buffer = static_cast<uint8_t*>(
+        heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!buffer) {
+        buffer = static_cast<uint8_t*>(
+            heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
     if (!buffer) {
         buffer = static_cast<uint8_t*>(heap_caps_malloc(bytes, MALLOC_CAP_8BIT));
     }

@@ -463,7 +463,7 @@ bool bmi270_tools::check_interrupt_status()
     if (int_status & BMI270_ANY_MOT_STATUS_MASK) {
         // This bit can remain asserted while the board is moving. Avoid
         // flooding the shared serial transport and starving live UI updates.
-        ESP_LOGI(TAG, "Any motion detected");
+        ESP_LOGD(TAG, "Any motion detected");
         interrupt_detected = true;
     }
 
