@@ -149,6 +149,158 @@ static const AudioFileMetadata AUDIO_FILE_TABLE[] = {
 
 static constexpr size_t AUDIO_FILE_COUNT = sizeof(AUDIO_FILE_TABLE) / sizeof(AUDIO_FILE_TABLE[0]);
 
+struct WavePcmPayload {
+    const uint8_t* data = nullptr;
+    size_t size = 0;
+    uint32_t sample_rate = 0;
+    uint16_t channels = 0;
+    uint16_t bits_per_sample = 0;
+};
+
+static uint16_t read_u16_le(const uint8_t* data)
+{
+    return static_cast<uint16_t>(data[0]) |
+           (static_cast<uint16_t>(data[1]) << 8);
+}
+
+static uint32_t read_u32_le(const uint8_t* data)
+{
+    return static_cast<uint32_t>(data[0]) |
+           (static_cast<uint32_t>(data[1]) << 8) |
+           (static_cast<uint32_t>(data[2]) << 16) |
+           (static_cast<uint32_t>(data[3]) << 24);
+}
+
+static bool chunk_id_equals(const uint8_t* data, const char id[5])
+{
+    return memcmp(data, id, 4) == 0;
+}
+
+static esp_err_t extract_wave_pcm_payload(const uint8_t* file_data,
+                                          size_t file_size,
+                                          bool& is_wave,
+                                          WavePcmPayload& payload)
+{
+    is_wave = false;
+    payload = {};
+
+    if (!file_data || file_size < 4 || !chunk_id_equals(file_data, "RIFF")) {
+        return ESP_OK;
+    }
+
+    is_wave = true;
+    if (file_size < 12 || !chunk_id_equals(file_data + 8, "WAVE")) {
+        ESP_LOGE(TAG, "RIFF audio data is missing the WAVE signature");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    const uint32_t riff_size = read_u32_le(file_data + 4);
+    if (riff_size < 4 || riff_size > file_size - 8) {
+        ESP_LOGE(TAG, "Invalid RIFF size: declared=%u available=%zu",
+                 static_cast<unsigned>(riff_size), file_size - 8);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    const size_t riff_end = static_cast<size_t>(riff_size) + 8;
+    size_t offset = 12;
+    bool fmt_found = false;
+    bool data_found = false;
+    uint16_t block_align = 0;
+    uint32_t byte_rate = 0;
+
+    while (offset <= riff_end && riff_end - offset >= 8) {
+        const uint8_t* chunk_header = file_data + offset;
+        const uint32_t chunk_size_u32 = read_u32_le(chunk_header + 4);
+        const size_t chunk_size = static_cast<size_t>(chunk_size_u32);
+        const size_t chunk_data_offset = offset + 8;
+
+        if (chunk_size > riff_end - chunk_data_offset) {
+            ESP_LOGE(TAG, "Truncated WAVE chunk %.4s: size=%u remaining=%zu",
+                     reinterpret_cast<const char*>(chunk_header),
+                     static_cast<unsigned>(chunk_size_u32),
+                     riff_end - chunk_data_offset);
+            return ESP_ERR_INVALID_SIZE;
+        }
+
+        const uint8_t* chunk_data = file_data + chunk_data_offset;
+        if (!fmt_found && chunk_id_equals(chunk_header, "fmt ")) {
+            if (chunk_size < 16) {
+                ESP_LOGE(TAG, "WAVE fmt chunk is too small: %zu", chunk_size);
+                return ESP_ERR_INVALID_SIZE;
+            }
+
+            const uint16_t format_tag = read_u16_le(chunk_data);
+            payload.channels = read_u16_le(chunk_data + 2);
+            payload.sample_rate = read_u32_le(chunk_data + 4);
+            byte_rate = read_u32_le(chunk_data + 8);
+            block_align = read_u16_le(chunk_data + 12);
+            payload.bits_per_sample = read_u16_le(chunk_data + 14);
+
+            if (format_tag != 1) {
+                ESP_LOGE(TAG, "Unsupported WAVE format tag: 0x%04X", format_tag);
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            if ((payload.channels != 1 && payload.channels != 2) ||
+                payload.sample_rate == 0 ||
+                (payload.bits_per_sample != 8 &&
+                 payload.bits_per_sample != 16 &&
+                 payload.bits_per_sample != 32)) {
+                ESP_LOGE(TAG, "Unsupported WAVE PCM format: %u Hz, %u bit, %u ch",
+                         static_cast<unsigned>(payload.sample_rate),
+                         static_cast<unsigned>(payload.bits_per_sample),
+                         static_cast<unsigned>(payload.channels));
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+
+            const uint32_t expected_block_align =
+                static_cast<uint32_t>(payload.channels) * payload.bits_per_sample / 8;
+            const uint64_t expected_byte_rate =
+                static_cast<uint64_t>(payload.sample_rate) * expected_block_align;
+            if (block_align != expected_block_align || byte_rate != expected_byte_rate) {
+                ESP_LOGE(TAG,
+                         "Inconsistent WAVE PCM format: block_align=%u/%u byte_rate=%u/%llu",
+                         static_cast<unsigned>(block_align),
+                         static_cast<unsigned>(expected_block_align),
+                         static_cast<unsigned>(byte_rate),
+                         static_cast<unsigned long long>(expected_byte_rate));
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+            fmt_found = true;
+        } else if (!data_found && chunk_id_equals(chunk_header, "data")) {
+            payload.data = chunk_data;
+            payload.size = chunk_size;
+            data_found = true;
+        }
+
+        size_t next_offset = chunk_data_offset + chunk_size;
+        if ((chunk_size & 1U) != 0U) {
+            if (next_offset >= riff_end) {
+                ESP_LOGE(TAG, "WAVE chunk %.4s is missing its padding byte",
+                         reinterpret_cast<const char*>(chunk_header));
+                return ESP_ERR_INVALID_SIZE;
+            }
+            ++next_offset;
+        }
+        offset = next_offset;
+
+        if (fmt_found && data_found) {
+            break;
+        }
+    }
+
+    if (!fmt_found || !data_found || !payload.data || payload.size == 0) {
+        ESP_LOGE(TAG, "WAVE file is missing a valid fmt or data chunk");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    if (block_align == 0 || (payload.size % block_align) != 0) {
+        ESP_LOGE(TAG, "WAVE data size is not frame-aligned: size=%zu block_align=%u",
+                 payload.size, static_cast<unsigned>(block_align));
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return ESP_OK;
+}
+
 static bool can_stream_convert_i16(audio_data_type_t input_type,
                                    audio_data_type_t target_type,
                                    uint32_t input_channels,
@@ -497,6 +649,48 @@ esp_err_t audio_playback::get_pcm_data_and_format(audio_file_type_t audio_type,
     if (!pcm_start || pcm_len == 0) {
         ESP_LOGE(TAG, "Invalid PCM data for %s", meta->filename);
         return ESP_ERR_INVALID_SIZE;
+    }
+
+    bool is_wave = false;
+    WavePcmPayload wave_payload = {};
+    esp_err_t ret = extract_wave_pcm_payload(pcm_start, pcm_len, is_wave, wave_payload);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to parse RIFF/WAVE data in %s: %s",
+                 meta->filename, esp_err_to_name(ret));
+        return ret;
+    }
+
+    if (is_wave) {
+        const uint32_t metadata_rate = file_sample_rate_hz;
+        const uint32_t metadata_channels = static_cast<uint32_t>(file_channels);
+        const uint32_t metadata_bits = static_cast<uint32_t>(file_bits);
+
+        file_sample_rate_hz = wave_payload.sample_rate;
+        file_channels = static_cast<audio_channels_t>(wave_payload.channels);
+        file_bits = static_cast<i2s_data_bit_width_t>(wave_payload.bits_per_sample);
+        pcm_start = wave_payload.data;
+        pcm_len = wave_payload.size;
+
+        if (metadata_rate != file_sample_rate_hz ||
+            metadata_channels != static_cast<uint32_t>(file_channels) ||
+            metadata_bits != static_cast<uint32_t>(file_bits)) {
+            ESP_LOGW(TAG,
+                     "WAVE header overrides metadata for %s: %u Hz/%u bit/%u ch -> %u Hz/%u bit/%u ch",
+                     meta->filename,
+                     static_cast<unsigned>(metadata_rate),
+                     static_cast<unsigned>(metadata_bits),
+                     static_cast<unsigned>(metadata_channels),
+                     static_cast<unsigned>(file_sample_rate_hz),
+                     static_cast<unsigned>(file_bits),
+                     static_cast<unsigned>(file_channels));
+        }
+
+        ESP_LOGI(TAG, "Parsed RIFF/WAVE payload for %s: data=%zu bytes, %u Hz, %u bit, %u ch",
+                 meta->filename,
+                 pcm_len,
+                 static_cast<unsigned>(file_sample_rate_hz),
+                 static_cast<unsigned>(file_bits),
+                 static_cast<unsigned>(file_channels));
     }
 
     return ESP_OK;
