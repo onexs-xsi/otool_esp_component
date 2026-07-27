@@ -10,7 +10,9 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/task.h"
+#include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static const char *TAG = "audio_playback";
 static constexpr size_t SILENCE_CHUNK_CAPACITY = 1024;
@@ -19,37 +21,37 @@ static uint8_t g_silence_chunk[SILENCE_CHUNK_CAPACITY] = {0};
 // ============================================================================
 // 音频文件嵌入声明 - 统一命名规范
 // ============================================================================
-#ifdef USE_AUDIO_CANDY_WIND_1CH_16K_16BIT_9S
+#ifdef USE_EMBEDDED_AUDIO_CANDY_WIND_1CH_16K_16BIT_9S
 extern const uint8_t _binary_candy_wind_pcm_1ch_16k_16bit_9s_pcm_start[];
 extern const uint8_t _binary_candy_wind_pcm_1ch_16k_16bit_9s_pcm_end[];
 #endif
 
-#ifdef USE_AUDIO_CANDY_WIND_1CH_44K_16BIT_45S
+#ifdef USE_EMBEDDED_AUDIO_CANDY_WIND_1CH_44K_16BIT_45S
 extern const uint8_t _binary_candy_wind_pcm_1ch_44_1k_16bit_45s_pcm_start[];
 extern const uint8_t _binary_candy_wind_pcm_1ch_44_1k_16bit_45s_pcm_end[];
 #endif
 
-#ifdef USE_AUDIO_CANDY_WIND_2CH_16K_16BIT_9S
+#ifdef USE_EMBEDDED_AUDIO_CANDY_WIND_2CH_16K_16BIT_9S
 extern const uint8_t _binary_candy_wind_pcm_2ch_16k_16bit_9s_pcm_start[];
 extern const uint8_t _binary_candy_wind_pcm_2ch_16k_16bit_9s_pcm_end[];
 #endif
 
-#ifdef USE_AUDIO_CANDY_WIND_2CH_44K_16BIT_45S
+#ifdef USE_EMBEDDED_AUDIO_CANDY_WIND_2CH_44K_16BIT_45S
 extern const uint8_t _binary_candy_wind_pcm_2ch_44_1k_16bit_45s_pcm_start[];
 extern const uint8_t _binary_candy_wind_pcm_2ch_44_1k_16bit_45s_pcm_end[];
 #endif
 
-#ifdef USE_AUDIO_SINE_440HZ_2CH_16K_16BIT_10S
+#ifdef USE_EMBEDDED_AUDIO_SINE_440HZ_2CH_16K_16BIT_10S
 extern const uint8_t _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_start[];
 extern const uint8_t _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_end[];
 #endif
 
-#ifdef USE_AUDIO_STARTUP_1CH_16K_16BIT_4S
+#ifdef USE_EMBEDDED_AUDIO_STARTUP_1CH_16K_16BIT_4S
 extern const uint8_t _binary_startup_pcm_1ch_16k_16bit_4s_pcm_start[];
 extern const uint8_t _binary_startup_pcm_1ch_16k_16bit_4s_pcm_end[];
 #endif
 
-#ifdef USE_AUDIO_STARTUP_2CH_16K_16BIT_4S
+#ifdef USE_EMBEDDED_AUDIO_STARTUP_2CH_16K_16BIT_4S
 extern const uint8_t _binary_startup_pcm_2ch_16k_16bit_4s_pcm_start[];
 extern const uint8_t _binary_startup_pcm_2ch_16k_16bit_4s_pcm_end[];
 #endif
@@ -59,7 +61,7 @@ extern const uint8_t _binary_startup_pcm_2ch_16k_16bit_4s_pcm_end[];
 // ============================================================================
 typedef bool (*AudioDataGetter)(const uint8_t*& start, size_t& len);
 
-#ifdef USE_AUDIO_CANDY_WIND_1CH_16K_16BIT_9S
+#ifdef USE_EMBEDDED_AUDIO_CANDY_WIND_1CH_16K_16BIT_9S
 static bool get_candy_wind_1ch_16k_data(const uint8_t*& start, size_t& len) {
     start = _binary_candy_wind_pcm_1ch_16k_16bit_9s_pcm_start;
     len = _binary_candy_wind_pcm_1ch_16k_16bit_9s_pcm_end - _binary_candy_wind_pcm_1ch_16k_16bit_9s_pcm_start;
@@ -67,7 +69,7 @@ static bool get_candy_wind_1ch_16k_data(const uint8_t*& start, size_t& len) {
 }
 #endif
 
-#ifdef USE_AUDIO_CANDY_WIND_1CH_44K_16BIT_45S
+#ifdef USE_EMBEDDED_AUDIO_CANDY_WIND_1CH_44K_16BIT_45S
 static bool get_candy_wind_1ch_44k_data(const uint8_t*& start, size_t& len) {
     start = _binary_candy_wind_pcm_1ch_44_1k_16bit_45s_pcm_start;
     len = _binary_candy_wind_pcm_1ch_44_1k_16bit_45s_pcm_end - _binary_candy_wind_pcm_1ch_44_1k_16bit_45s_pcm_start;
@@ -75,7 +77,7 @@ static bool get_candy_wind_1ch_44k_data(const uint8_t*& start, size_t& len) {
 }
 #endif
 
-#ifdef USE_AUDIO_CANDY_WIND_2CH_16K_16BIT_9S
+#ifdef USE_EMBEDDED_AUDIO_CANDY_WIND_2CH_16K_16BIT_9S
 static bool get_candy_wind_2ch_16k_data(const uint8_t*& start, size_t& len) {
     start = _binary_candy_wind_pcm_2ch_16k_16bit_9s_pcm_start;
     len = _binary_candy_wind_pcm_2ch_16k_16bit_9s_pcm_end - _binary_candy_wind_pcm_2ch_16k_16bit_9s_pcm_start;
@@ -83,7 +85,7 @@ static bool get_candy_wind_2ch_16k_data(const uint8_t*& start, size_t& len) {
 }
 #endif
 
-#ifdef USE_AUDIO_CANDY_WIND_2CH_44K_16BIT_45S
+#ifdef USE_EMBEDDED_AUDIO_CANDY_WIND_2CH_44K_16BIT_45S
 static bool get_candy_wind_2ch_44k_data(const uint8_t*& start, size_t& len) {
     start = _binary_candy_wind_pcm_2ch_44_1k_16bit_45s_pcm_start;
     len = _binary_candy_wind_pcm_2ch_44_1k_16bit_45s_pcm_end - _binary_candy_wind_pcm_2ch_44_1k_16bit_45s_pcm_start;
@@ -91,7 +93,7 @@ static bool get_candy_wind_2ch_44k_data(const uint8_t*& start, size_t& len) {
 }
 #endif
 
-#ifdef USE_AUDIO_SINE_440HZ_2CH_16K_16BIT_10S
+#ifdef USE_EMBEDDED_AUDIO_SINE_440HZ_2CH_16K_16BIT_10S
 static bool get_sine_440hz_2ch_16k_data(const uint8_t*& start, size_t& len) {
     start = _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_start;
     len = _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_end - _binary_sine_440Hz_pcm_2ch_16k_16bit_10s_pcm_start;
@@ -99,7 +101,7 @@ static bool get_sine_440hz_2ch_16k_data(const uint8_t*& start, size_t& len) {
 }
 #endif
 
-#ifdef USE_AUDIO_STARTUP_1CH_16K_16BIT_4S
+#ifdef USE_EMBEDDED_AUDIO_STARTUP_1CH_16K_16BIT_4S
 static bool get_startup_1ch_16k_data(const uint8_t*& start, size_t& len) {
     start = _binary_startup_pcm_1ch_16k_16bit_4s_pcm_start;
     len = _binary_startup_pcm_1ch_16k_16bit_4s_pcm_end - _binary_startup_pcm_1ch_16k_16bit_4s_pcm_start;
@@ -107,7 +109,7 @@ static bool get_startup_1ch_16k_data(const uint8_t*& start, size_t& len) {
 }
 #endif
 
-#ifdef USE_AUDIO_STARTUP_2CH_16K_16BIT_4S
+#ifdef USE_EMBEDDED_AUDIO_STARTUP_2CH_16K_16BIT_4S
 static bool get_startup_2ch_16k_data(const uint8_t*& start, size_t& len) {
     start = _binary_startup_pcm_2ch_16k_16bit_4s_pcm_start;
     len = _binary_startup_pcm_2ch_16k_16bit_4s_pcm_end - _binary_startup_pcm_2ch_16k_16bit_4s_pcm_start;
@@ -121,29 +123,72 @@ struct AudioFileMetadata {
     audio_channels_t channels;
     i2s_data_bit_width_t bits;
     AudioDataGetter data_getter;
+    const char* external_path;
 };
 
 static const AudioFileMetadata AUDIO_FILE_TABLE[] = {
 #ifdef USE_AUDIO_CANDY_WIND_1CH_16K_16BIT_9S
-    {AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S, "candy_wind_pcm_1ch_16k_16bit_9s.pcm", 16000, AUDIO_CHANNELS_MONO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_1ch_16k_data},
+#ifdef USE_EMBEDDED_AUDIO_CANDY_WIND_1CH_16K_16BIT_9S
+    {AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S, "candy_wind_pcm_1ch_16k_16bit_9s.pcm", 16000, AUDIO_CHANNELS_MONO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_1ch_16k_data, nullptr},
+#elif defined(USE_EXTERNAL_AUDIO_CANDY_WIND_1CH_16K_16BIT_9S)
+    {AUDIO_FILE_CANDY_WIND_1CH_16K_16B_9S, "candy_wind_pcm_1ch_16k_16bit_9s.pcm", 16000, AUDIO_CHANNELS_MONO, I2S_DATA_BIT_WIDTH_16BIT, nullptr, OTOOL_AUDIO_FILE_PATH_AUDIO_CANDY_WIND_1CH_16K_16BIT_9S},
+#else
+#error "Audio source is not configured for AUDIO_CANDY_WIND_1CH_16K_16BIT_9S"
+#endif
 #endif
 #ifdef USE_AUDIO_CANDY_WIND_1CH_44K_16BIT_45S
-    {AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S, "candy_wind_pcm_1ch_44.1k_16bit_45s.pcm", 44100, AUDIO_CHANNELS_MONO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_1ch_44k_data},
+#ifdef USE_EMBEDDED_AUDIO_CANDY_WIND_1CH_44K_16BIT_45S
+    {AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S, "candy_wind_pcm_1ch_44.1k_16bit_45s.pcm", 44100, AUDIO_CHANNELS_MONO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_1ch_44k_data, nullptr},
+#elif defined(USE_EXTERNAL_AUDIO_CANDY_WIND_1CH_44K_16BIT_45S)
+    {AUDIO_FILE_CANDY_WIND_1CH_44K_16B_45S, "candy_wind_pcm_1ch_44.1k_16bit_45s.pcm", 44100, AUDIO_CHANNELS_MONO, I2S_DATA_BIT_WIDTH_16BIT, nullptr, OTOOL_AUDIO_FILE_PATH_AUDIO_CANDY_WIND_1CH_44K_16BIT_45S},
+#else
+#error "Audio source is not configured for AUDIO_CANDY_WIND_1CH_44K_16BIT_45S"
+#endif
 #endif
 #ifdef USE_AUDIO_CANDY_WIND_2CH_16K_16BIT_9S
-    {AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S, "candy_wind_pcm_2ch_16k_16bit_9s.pcm", 16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_2ch_16k_data},
+#ifdef USE_EMBEDDED_AUDIO_CANDY_WIND_2CH_16K_16BIT_9S
+    {AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S, "candy_wind_pcm_2ch_16k_16bit_9s.pcm", 16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_2ch_16k_data, nullptr},
+#elif defined(USE_EXTERNAL_AUDIO_CANDY_WIND_2CH_16K_16BIT_9S)
+    {AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S, "candy_wind_pcm_2ch_16k_16bit_9s.pcm", 16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, nullptr, OTOOL_AUDIO_FILE_PATH_AUDIO_CANDY_WIND_2CH_16K_16BIT_9S},
+#else
+#error "Audio source is not configured for AUDIO_CANDY_WIND_2CH_16K_16BIT_9S"
+#endif
 #endif
 #ifdef USE_AUDIO_CANDY_WIND_2CH_44K_16BIT_45S
-    {AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S, "candy_wind_pcm_2ch_44.1k_16bit_45s.pcm", 44100, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_2ch_44k_data},
+#ifdef USE_EMBEDDED_AUDIO_CANDY_WIND_2CH_44K_16BIT_45S
+    {AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S, "candy_wind_pcm_2ch_44.1k_16bit_45s.pcm", 44100, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_candy_wind_2ch_44k_data, nullptr},
+#elif defined(USE_EXTERNAL_AUDIO_CANDY_WIND_2CH_44K_16BIT_45S)
+    {AUDIO_FILE_CANDY_WIND_2CH_44K_16B_45S, "candy_wind_pcm_2ch_44.1k_16bit_45s.pcm", 44100, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, nullptr, OTOOL_AUDIO_FILE_PATH_AUDIO_CANDY_WIND_2CH_44K_16BIT_45S},
+#else
+#error "Audio source is not configured for AUDIO_CANDY_WIND_2CH_44K_16BIT_45S"
+#endif
 #endif
 #ifdef USE_AUDIO_SINE_440HZ_2CH_16K_16BIT_10S
-    {AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S, "sine_440Hz_pcm_2ch_16k_16bit_10s.pcm", 16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_sine_440hz_2ch_16k_data},
+#ifdef USE_EMBEDDED_AUDIO_SINE_440HZ_2CH_16K_16BIT_10S
+    {AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S, "sine_440Hz_pcm_2ch_16k_16bit_10s.pcm", 16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_sine_440hz_2ch_16k_data, nullptr},
+#elif defined(USE_EXTERNAL_AUDIO_SINE_440HZ_2CH_16K_16BIT_10S)
+    {AUDIO_FILE_SINE_440HZ_2CH_16K_16B_10S, "sine_440Hz_pcm_2ch_16k_16bit_10s.pcm", 16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, nullptr, OTOOL_AUDIO_FILE_PATH_AUDIO_SINE_440HZ_2CH_16K_16BIT_10S},
+#else
+#error "Audio source is not configured for AUDIO_SINE_440HZ_2CH_16K_16BIT_10S"
+#endif
 #endif
 #ifdef USE_AUDIO_STARTUP_1CH_16K_16BIT_4S
-    {AUDIO_FILE_STARTUP_1CH_16K_16B_4S, "startup_pcm_1ch_16k_16bit_4s.pcm", 16000, AUDIO_CHANNELS_MONO, I2S_DATA_BIT_WIDTH_16BIT, get_startup_1ch_16k_data},
+#ifdef USE_EMBEDDED_AUDIO_STARTUP_1CH_16K_16BIT_4S
+    {AUDIO_FILE_STARTUP_1CH_16K_16B_4S, "startup_pcm_1ch_16k_16bit_4s.pcm", 16000, AUDIO_CHANNELS_MONO, I2S_DATA_BIT_WIDTH_16BIT, get_startup_1ch_16k_data, nullptr},
+#elif defined(USE_EXTERNAL_AUDIO_STARTUP_1CH_16K_16BIT_4S)
+    {AUDIO_FILE_STARTUP_1CH_16K_16B_4S, "startup_pcm_1ch_16k_16bit_4s.pcm", 16000, AUDIO_CHANNELS_MONO, I2S_DATA_BIT_WIDTH_16BIT, nullptr, OTOOL_AUDIO_FILE_PATH_AUDIO_STARTUP_1CH_16K_16BIT_4S},
+#else
+#error "Audio source is not configured for AUDIO_STARTUP_1CH_16K_16BIT_4S"
+#endif
 #endif
 #ifdef USE_AUDIO_STARTUP_2CH_16K_16BIT_4S
-    {AUDIO_FILE_STARTUP_2CH_16K_16B_4S, "startup_pcm_2ch_16k_16bit_4s.pcm", 16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_startup_2ch_16k_data},
+#ifdef USE_EMBEDDED_AUDIO_STARTUP_2CH_16K_16BIT_4S
+    {AUDIO_FILE_STARTUP_2CH_16K_16B_4S, "startup_pcm_2ch_16k_16bit_4s.pcm", 16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, get_startup_2ch_16k_data, nullptr},
+#elif defined(USE_EXTERNAL_AUDIO_STARTUP_2CH_16K_16BIT_4S)
+    {AUDIO_FILE_STARTUP_2CH_16K_16B_4S, "startup_pcm_2ch_16k_16bit_4s.pcm", 16000, AUDIO_CHANNELS_STEREO, I2S_DATA_BIT_WIDTH_16BIT, nullptr, OTOOL_AUDIO_FILE_PATH_AUDIO_STARTUP_2CH_16K_16BIT_4S},
+#else
+#error "Audio source is not configured for AUDIO_STARTUP_2CH_16K_16BIT_4S"
+#endif
 #endif
 };
 
@@ -549,6 +594,71 @@ static const AudioFileMetadata* find_audio_metadata(audio_file_type_t type) {
     return nullptr;
 }
 
+struct ScopedAudioFileBuffer {
+    uint8_t* data = nullptr;
+
+    ~ScopedAudioFileBuffer()
+    {
+        if (data) {
+            heap_caps_free(data);
+        }
+    }
+};
+
+static esp_err_t load_external_audio_file(const char* path,
+                                          uint8_t*& file_data,
+                                          size_t& file_size)
+{
+    file_data = nullptr;
+    file_size = 0;
+    if (!path || path[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    FILE* file = fopen(path, "rb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open external audio file: %s", path);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (fseek(file, 0, SEEK_END) != 0) {
+        ESP_LOGE(TAG, "Failed to seek external audio file: %s", path);
+        fclose(file);
+        return ESP_FAIL;
+    }
+    const long length = ftell(file);
+    if (length <= 0 || fseek(file, 0, SEEK_SET) != 0) {
+        ESP_LOGE(TAG, "Invalid external audio file size for %s: %ld", path, length);
+        fclose(file);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    const size_t length_bytes = static_cast<size_t>(length);
+    uint8_t* buffer = static_cast<uint8_t*>(
+        heap_caps_malloc(length_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!buffer) {
+        ESP_LOGE(TAG, "Failed to allocate %zu bytes in PSRAM for %s",
+                 length_bytes, path);
+        fclose(file);
+        return ESP_ERR_NO_MEM;
+    }
+
+    const size_t bytes_read = fread(buffer, 1, length_bytes, file);
+    const int close_result = fclose(file);
+    if (bytes_read != length_bytes || close_result != 0) {
+        ESP_LOGE(TAG, "Failed to read external audio file %s: %zu/%zu bytes",
+                 path, bytes_read, length_bytes);
+        heap_caps_free(buffer);
+        return ESP_FAIL;
+    }
+
+    file_data = buffer;
+    file_size = length_bytes;
+    ESP_LOGI(TAG, "Loaded external audio file %s into PSRAM (%zu bytes)",
+             path, file_size);
+    return ESP_OK;
+}
+
 // ============================================================================
 // 构造 / 析构
 // ============================================================================
@@ -609,7 +719,15 @@ esp_err_t audio_playback::get_audio_file_pcm(audio_file_type_t audio_type,
 bool audio_playback::is_audio_file_available(audio_file_type_t audio_type) const
 {
     const AudioFileMetadata* meta = find_audio_metadata(audio_type);
-    return (meta != nullptr);
+    if (!meta) {
+        return false;
+    }
+    if (!meta->external_path) {
+        return meta->data_getter != nullptr;
+    }
+
+    struct stat info = {};
+    return stat(meta->external_path, &info) == 0 && info.st_size > 0;
 }
 
 // ============================================================================
@@ -621,10 +739,14 @@ esp_err_t audio_playback::get_pcm_data_and_format(audio_file_type_t audio_type,
                                                     size_t& pcm_len,
                                                     uint32_t& file_sample_rate_hz,
                                                     audio_channels_t& file_channels,
-                                                    i2s_data_bit_width_t& file_bits)
+                                                    i2s_data_bit_width_t& file_bits,
+                                                    uint8_t** owned_file_buffer)
 {
     pcm_start = nullptr;
     pcm_len = 0;
+    if (owned_file_buffer) {
+        *owned_file_buffer = nullptr;
+    }
 
     const AudioFileMetadata* meta = find_audio_metadata(audio_type);
     if (!meta) {
@@ -636,12 +758,26 @@ esp_err_t audio_playback::get_pcm_data_and_format(audio_file_type_t audio_type,
     file_channels = meta->channels;
     file_bits = meta->bits;
 
-    if (!meta->data_getter) {
+    if (meta->external_path) {
+        if (!owned_file_buffer) {
+            ESP_LOGE(TAG,
+                     "%s is file-backed and cannot expose a persistent PCM pointer",
+                     meta->filename);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+
+        esp_err_t load_ret =
+            load_external_audio_file(meta->external_path,
+                                     *owned_file_buffer,
+                                     pcm_len);
+        if (load_ret != ESP_OK) {
+            return load_ret;
+        }
+        pcm_start = *owned_file_buffer;
+    } else if (!meta->data_getter) {
         ESP_LOGE(TAG, "%s not compiled in (data_getter is null)", meta->filename);
         return ESP_ERR_NOT_SUPPORTED;
-    }
-
-    if (!meta->data_getter(pcm_start, pcm_len)) {
+    } else if (!meta->data_getter(pcm_start, pcm_len)) {
         ESP_LOGE(TAG, "Failed to get PCM data for %s", meta->filename);
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -733,9 +869,11 @@ esp_err_t audio_playback::play_audio_file_impl(audio_file_type_t audio_type, boo
     uint32_t file_sample_rate_hz = static_cast<uint32_t>(parent_->sample_rate);
     audio_channels_t file_channels = parent_->tx_channels;
     i2s_data_bit_width_t file_bits = parent_->bits_per_sample;
+    ScopedAudioFileBuffer owned_file_buffer;
 
     esp_err_t ret = get_pcm_data_and_format(audio_type, pcm_start, pcm_len,
-                                             file_sample_rate_hz, file_channels, file_bits);
+                                             file_sample_rate_hz, file_channels,
+                                             file_bits, &owned_file_buffer.data);
     if (ret != ESP_OK) {
         return ret;
     }

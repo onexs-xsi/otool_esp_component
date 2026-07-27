@@ -773,6 +773,21 @@ ESP-SR AEC 算法硬性要求 16kHz。初始化时用 `AUDIO_SAMPLE_RATE_16K`。
 
 ES7210 在 TDM 模式下，一个 LRCK 周期内传输 4 路 16-bit 数据，ESP32 使用 `I2S_SLOT_MODE_STEREO`（32bit × 2 槽）接收。左槽的高 16 位 = MIC1、低 16 位 = MIC3；右槽的高 16 位 = MIC2、低 16 位 = MIC4。
 
+### 项目级外部音频文件
+
+项目可以在 `project()` 之前声明 `OTOOL_AUDIO_EXTERNAL_FILES`，将任意已启用
+的音频条目放在应用镜像之外：
+
+```cmake
+set(OTOOL_AUDIO_EXTERNAL_FILES
+    "AUDIO_ID|${CMAKE_CURRENT_LIST_DIR}/path/to/source.pcm|/mounted/runtime.pcm"
+)
+```
+
+每项格式为 `音频 ID | 构建时源文件 | 运行时绝对路径`。音频组件会从运行时
+路径加载该条目，不再把它加入 `EMBED_FILES`；项目的存储打包逻辑负责把源文件
+部署到对应路径。清单中未列出的 ID 继续使用固件嵌入方式。
+
 ### Q: `remix_convert_pcm_to_format()` 输出 output_data 为 nullptr？
 
 当输入格式和目标格式完全一致时，函数返回 `ESP_OK` 但 `output_data = nullptr`，表示零拷贝，不需要转换。

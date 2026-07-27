@@ -643,7 +643,8 @@ class CodeUpdater:
         declarations = [start_marker.split('\n')[0], "// 音频文件嵌入声明 - 使用统一命名规范", "// ============================================================================"]
         
         for info in audio_files:
-            declarations.append(f"#ifdef {info.macro_name}")
+            audio_id = info.macro_name[4:]
+            declarations.append(f"#ifdef USE_EMBEDDED_{audio_id}")
             declarations.append(f"extern const uint8_t {info.binary_start_symbol}[];")
             declarations.append(f"extern const uint8_t {info.binary_end_symbol}[];")
             declarations.append("#endif")
@@ -669,7 +670,8 @@ class CodeUpdater:
         functions = [start_marker]
         
         for info in audio_files:
-            functions.append(f"#ifdef {info.macro_name}")
+            audio_id = info.macro_name[4:]
+            functions.append(f"#ifdef USE_EMBEDDED_{audio_id}")
             functions.append(f"static bool {info.getter_func_name}(const uint8_t*& start, size_t& len) {{")
             functions.append(f"    start = {info.binary_start_symbol};")
             functions.append(f"    len = {info.binary_end_symbol} - {info.binary_start_symbol};")
@@ -699,7 +701,8 @@ class CodeUpdater:
         ]
 
         for info in audio_files:
-            declarations.append(f"#ifdef {info.macro_name}")
+            audio_id = info.macro_name[4:]
+            declarations.append(f"#ifdef USE_EMBEDDED_{audio_id}")
             declarations.append(f"extern const uint8_t {info.binary_start_symbol}[];")
             declarations.append(f"extern const uint8_t {info.binary_end_symbol}[];")
             declarations.append("#endif")
@@ -732,7 +735,8 @@ class CodeUpdater:
         functions = [""]
 
         for info in audio_files:
-            functions.append(f"#ifdef {info.macro_name}")
+            audio_id = info.macro_name[4:]
+            functions.append(f"#ifdef USE_EMBEDDED_{audio_id}")
             functions.append(f"static bool {info.getter_func_name}(const uint8_t*& start, size_t& len) {{")
             functions.append(f"    start = {info.binary_start_symbol};")
             functions.append(f"    len = {info.binary_end_symbol} - {info.binary_start_symbol};")
@@ -766,10 +770,17 @@ class CodeUpdater:
             
             # 确定位宽类型
             bits_macro = f"I2S_DATA_BIT_WIDTH_{info.bits}BIT"
+            audio_id = info.macro_name[4:]
             
             entry_lines = [
                 f"#ifdef {info.macro_name}",
-                f'    {{{info.enum_name}, "{info.filename}", {info.sample_rate}, {channels_macro}, {bits_macro}, {info.getter_func_name}}},',
+                f"#ifdef USE_EMBEDDED_{audio_id}",
+                f'    {{{info.enum_name}, "{info.filename}", {info.sample_rate}, {channels_macro}, {bits_macro}, {info.getter_func_name}, nullptr}},',
+                f"#elif defined(USE_EXTERNAL_{audio_id})",
+                f'    {{{info.enum_name}, "{info.filename}", {info.sample_rate}, {channels_macro}, {bits_macro}, nullptr, OTOOL_AUDIO_FILE_PATH_{audio_id}}},',
+                "#else",
+                f'#error "Audio source is not configured for {audio_id}"',
+                "#endif",
                 "#endif"
             ]
             table_entries.extend(entry_lines)

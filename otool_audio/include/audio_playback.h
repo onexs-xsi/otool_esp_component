@@ -69,7 +69,8 @@ private:
                                       size_t& pcm_len,
                                       uint32_t& file_sample_rate_hz,
                                       audio_channels_t& file_channels,
-                                      i2s_data_bit_width_t& file_bits);
+                                      i2s_data_bit_width_t& file_bits,
+                                      uint8_t** owned_file_buffer = nullptr);
 
 public:
     explicit audio_playback(audio_tools* parent);
