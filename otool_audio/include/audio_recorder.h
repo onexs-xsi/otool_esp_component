@@ -157,6 +157,19 @@ public:
                                   esp_codec_dev_sample_info_t* sample_info_out = nullptr,
                                   mic_channel_sample_window_t* sample_window_out = nullptr);
 
+    /**
+     * @brief Capture and retain the independent microphone PCM channels.
+     *
+     * The caller owns split_result_out on success and must release it with
+     * free_channel_split_result().  This is intended for bounded diagnostic
+     * captures which need later channel-by-channel playback.
+     */
+    esp_err_t capture_mic_channels(uint32_t duration_ms,
+                                   channel_split_result_t* split_result_out,
+                                   mic_channel_quality_t quality[4],
+                                   size_t* bytes_read_out = nullptr,
+                                   esp_codec_dev_sample_info_t* sample_info_out = nullptr);
+
     // ===== 废弃测试函数 (代码保留，标注 deprecated) =====
 
     [[deprecated("Use test_record_quality() from audio_test_utils.h")]]
