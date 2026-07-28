@@ -16,6 +16,8 @@
 
 static const char *TAG = "audio_playback";
 static constexpr size_t SILENCE_CHUNK_CAPACITY = 1024;
+static constexpr size_t EXTERNAL_AUDIO_READ_CHUNK_SIZE = 32 * 1024;
+static constexpr TickType_t EXTERNAL_AUDIO_READ_YIELD_TICKS = 1;
 static uint8_t g_silence_chunk[SILENCE_CHUNK_CAPACITY] = {0};
 
 // ============================================================================
@@ -607,7 +609,8 @@ struct ScopedAudioFileBuffer {
 
 static esp_err_t load_external_audio_file(const char* path,
                                           uint8_t*& file_data,
-                                          size_t& file_size)
+                                          size_t& file_size,
+                                          bool check_stop_signal)
 {
     file_data = nullptr;
     file_size = 0;
@@ -643,11 +646,56 @@ static esp_err_t load_external_audio_file(const char* path,
         return ESP_ERR_NO_MEM;
     }
 
-    const size_t bytes_read = fread(buffer, 1, length_bytes, file);
+    size_t total_bytes_read = 0;
+    while (total_bytes_read < length_bytes) {
+        if (check_stop_signal) {
+            uint32_t notification_value = 0;
+            if (xTaskNotifyWait(0, 0, &notification_value, 0) == pdTRUE) {
+                ESP_LOGI(TAG,
+                         "External audio load interrupted at %zu/%zu bytes",
+                         total_bytes_read,
+                         length_bytes);
+                fclose(file);
+                heap_caps_free(buffer);
+                return ESP_ERR_INVALID_STATE;
+            }
+        }
+
+        const size_t remaining = length_bytes - total_bytes_read;
+        const size_t bytes_to_read =
+            remaining < EXTERNAL_AUDIO_READ_CHUNK_SIZE
+                ? remaining
+                : EXTERNAL_AUDIO_READ_CHUNK_SIZE;
+        const size_t chunk_bytes_read =
+            fread(buffer + total_bytes_read, 1, bytes_to_read, file);
+        total_bytes_read += chunk_bytes_read;
+        if (chunk_bytes_read != bytes_to_read) {
+            ESP_LOGE(TAG,
+                     "Failed to read external audio file %s: %zu/%zu bytes "
+                     "(chunk %zu/%zu, error=%d, eof=%d)",
+                     path,
+                     total_bytes_read,
+                     length_bytes,
+                     chunk_bytes_read,
+                     bytes_to_read,
+                     ferror(file) != 0,
+                     feof(file) != 0);
+            fclose(file);
+            heap_caps_free(buffer);
+            return ESP_FAIL;
+        }
+
+        if (total_bytes_read < length_bytes) {
+            // SPIFFS reads are synchronous. Block for one tick between chunks
+            // so the core's Idle task can run and service the task watchdog.
+            vTaskDelay(EXTERNAL_AUDIO_READ_YIELD_TICKS);
+        }
+    }
+
     const int close_result = fclose(file);
-    if (bytes_read != length_bytes || close_result != 0) {
-        ESP_LOGE(TAG, "Failed to read external audio file %s: %zu/%zu bytes",
-                 path, bytes_read, length_bytes);
+    if (close_result != 0) {
+        ESP_LOGE(TAG, "Failed to close external audio file after reading: %s",
+                 path);
         heap_caps_free(buffer);
         return ESP_FAIL;
     }
@@ -740,7 +788,8 @@ esp_err_t audio_playback::get_pcm_data_and_format(audio_file_type_t audio_type,
                                                     uint32_t& file_sample_rate_hz,
                                                     audio_channels_t& file_channels,
                                                     i2s_data_bit_width_t& file_bits,
-                                                    uint8_t** owned_file_buffer)
+                                                    uint8_t** owned_file_buffer,
+                                                    bool check_stop_signal)
 {
     pcm_start = nullptr;
     pcm_len = 0;
@@ -769,7 +818,8 @@ esp_err_t audio_playback::get_pcm_data_and_format(audio_file_type_t audio_type,
         esp_err_t load_ret =
             load_external_audio_file(meta->external_path,
                                      *owned_file_buffer,
-                                     pcm_len);
+                                     pcm_len,
+                                     check_stop_signal);
         if (load_ret != ESP_OK) {
             return load_ret;
         }
@@ -873,7 +923,8 @@ esp_err_t audio_playback::play_audio_file_impl(audio_file_type_t audio_type, boo
 
     esp_err_t ret = get_pcm_data_and_format(audio_type, pcm_start, pcm_len,
                                              file_sample_rate_hz, file_channels,
-                                             file_bits, &owned_file_buffer.data);
+                                             file_bits, &owned_file_buffer.data,
+                                             check_stop_signal);
     if (ret != ESP_OK) {
         return ret;
     }
